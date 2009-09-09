@@ -1,5 +1,9 @@
+#define PY_SSIZE_T_CLEAN
 #include "Python.h"
 #include "structmember.h"
+
+#include <sys/types.h>
+#include <sys/socket.h>
 
 #include "coev.h"
 
@@ -56,6 +60,7 @@ static PyObject* PyExc_CoroWakeUp;
 static PyObject* PyExc_CoroTimeout;
 static PyObject* PyExc_CoroNoSchedInRoot;
 static PyObject* PyExc_CoroSwitchDenied;
+static PyObject* PyExc_CoroSocketError;
 
 static struct _exc_def {
     PyObject **exc;
@@ -96,6 +101,11 @@ can be used to kill a single coroutine.\n"
         "coev.SwitchDenied", "SwitchDenied",
         "Switch (wait, sleep) is denied. Please remember that no switches\n"
         "are allowed in constructors of classes derived from coev.local\n"
+    },
+    {
+        &PyExc_CoroSocketError, &PyExc_CoroError,
+        "coev.SocketError", "SocketError",
+        "ask Captain Obvious\n"
     },
     { 0 }
 };
@@ -923,6 +933,326 @@ corolocal_getattro(CoroLocalData *self, PyObject *name)
     return value;
 }
 
+/** coev.socketfile - file-like interface to a network socket */
+
+typedef struct {
+    PyObject_HEAD
+    int fd;
+    char *in_buffer, *in_position;
+    Py_ssize_t in_allocated, in_used, in_limit;
+    double iop_timeout;
+} CoroSocketFile;
+
+PyDoc_STRVAR(socketfile_doc,
+"socketfile(fd, timeout, [rlim]) -> socketfile object\n\n\
+Coroutine-aware file-like interface to network sockets.\n\n\
+fd -- integer fd to wrap around.\n\
+timeout -- float timeout per IO operation.\n\
+rlim -- read buffer size limit (default 4K).\n\
+");
+
+static PyObject *
+socketfile_new(PyTypeObject *type, PyObject *args, PyObject *kw) {
+    CoroSocketFile *self;
+    static char *kwds[] = {  "fd", "timeout", "rlim", NULL };
+
+    self = (CoroSocketFile *)type->tp_alloc(type, 0);
+    if (self == NULL)
+        return NULL;
+    
+    self->in_buffer = NULL;
+    self->in_allocated = 4096;
+    self->in_limit = 4096;
+    
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "nd|n", kwds,
+	    &self->fd, &self->iop_timeout, &self->in_limit)) {
+	Py_DECREF(self);
+	return NULL;
+    }
+    if (self->in_limit == 0) {
+	PyErr_SetString(PyExc_ValueError, "Read buffer limit must be positive");
+	Py_DECREF(self);
+	return NULL;
+    }
+    self->in_buffer = PyMem_Malloc(self->in_allocated);
+    
+    if (!self->in_buffer) {
+	Py_DECREF(self);
+	return PyErr_NoMemory();
+    }
+    self->in_position = self->in_buffer;
+    
+    return (PyObject *)self;
+}
+
+static void
+socketfile_dealloc(CoroSocketFile *self) {
+    if (self->in_buffer)
+	PyMem_Free(self->in_buffer);
+
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyObject *
+mod_wait_bottom_half(int fd, int revents, ev_tstamp timeout);
+
+#define INBUF_MAGIC (1<<12)
+/** makes some space at the end of the read buffer 
+by either moving occupied space or growing it by reallocating 
+*/
+static int
+sf_reshuffle_buffer(CoroSocketFile *self, Py_ssize_t needed) {
+    Py_ssize_t top_free, total_free;
+    
+    top_free = self->in_position - self->in_buffer;
+    total_free = self->in_allocated - self->in_used;
+    
+    if (total_free - top_free > needed) 
+	return 0;
+    
+    if (needed > total_free - 2 * INBUF_MAGIC) {
+	/* reallocation imminent */
+	Py_ssize_t newsize = INBUF_MAGIC + ((needed - total_free) & (INBUF_MAGIC - 1));
+	char *newbuf = PyMem_Realloc(self->in_buffer, newsize);
+	if (!newbuf) {
+	/* memmove imminent */
+	    newbuf = PyMem_Malloc(newsize);
+	    if (!newbuf)
+		return -1; /* no memory */
+	    memmove(newbuf, self->in_position, self->in_used);
+	    PyMem_Free(self->in_buffer);
+	    self->in_position = self->in_buffer = newbuf;
+	    self->in_allocated = newsize;
+	    if (newsize > self->in_limit)
+		self->in_limit = newsize;
+	    return 0;
+	}
+    }
+    /* we're still have 2*INBUF_MAGIC bytes more than needed */
+    
+    memmove(self->in_buffer, self->in_position, self->in_used);
+    self->in_position = self->in_buffer;
+    
+    return 0;
+}
+
+
+PyDoc_STRVAR(socketfile_read_doc,
+"read(size) -> bytestr\n\n\
+Read at most size bytes or until EOF is reached.\n\
+size -- size hint.\n\
+");
+static PyObject * 
+socketfile_read(CoroSocketFile *self, PyObject* args) {
+    Py_ssize_t len = 0, readen;
+    PyObject *rv;
+    
+    if (!PyArg_ParseTuple(args, "n", &len))
+	return NULL;
+
+    if (len == 0) 
+	return PyErr_SetString(PyExc_ValueError, "Read size must be positive"), NULL;
+    
+    /* check if we have enough contigous space in buffer */
+    if (sf_reshuffle_buffer(self, len)) 
+	return PyErr_NoMemory();
+    
+    do {
+	/* check if we have enough data in buffer */
+	if ( self->in_used >= len ) {
+	    rv = PyString_FromStringAndSize(self->in_position, len);
+	    self->in_used -= len;
+	    self->in_position += len;
+	    return rv;
+	}
+	
+	readen = recv(self->fd, self->in_position + self->in_used, 
+	              len - self->in_used, 0);
+	if (readen == -1) {
+	    if (errno == EAGAIN) {
+		rv = mod_wait_bottom_half(self->fd, COEV_READ, self->iop_timeout);
+		if (!rv)
+		    return rv;
+		Py_DECREF(rv);
+		continue;
+	    }
+	    return PyErr_SetFromErrno(PyExc_CoroSocketError);
+	}
+	if (readen == 0)
+	    len = self->in_used; /* return whatever we managed to read. */
+	else
+	    self->in_used += readen;
+    } while (1);
+}
+
+static PyObject *
+sf_extract_line(CoroSocketFile *self, const char *startfrom, ssize_t limit) {
+    char *culprit;
+    char *buffer_end;
+    ssize_t len;
+    PyObject *the_line;
+    
+    buffer_end = self->in_buffer + self->in_allocated;
+    len = buffer_end - startfrom;
+    
+    culprit = memchr(startfrom, '\n', len);
+    if ( (!culprit) && (self->in_used < limit) )
+	return NULL; /* need more data */
+    
+    len = culprit ? culprit - self->in_position + 1 : limit;
+    the_line = PyString_FromStringAndSize(self->in_position, len);
+    
+    self->in_used -= len;
+    
+    if (!self->in_used)
+	self->in_position = self->in_buffer;
+    else
+	self->in_position += len;
+    
+    return the_line;
+}
+
+PyDoc_STRVAR(socketfile_readline_doc,
+"readline(size) -> str\n\n\
+Read at most size bytes or until LF or EOF are reached.\n\
+Notice: if supplied size is larger than buffer growth limit,\n\
+the latter is adjusted upwards.\n\
+");
+static PyObject* 
+socketfile_readline(CoroSocketFile *self, PyObject* args) {
+    Py_ssize_t limit = 0, readen;   
+    PyObject *rv;
+    char *old_position;
+    
+    if (!PyArg_ParseTuple(args, "n", &limit ))
+	return NULL;
+    
+    if (!limit)
+	return PyErr_SetString(PyExc_ValueError, "Line size limit must be positive"), NULL;
+    
+    if (limit > self->in_limit)
+	self->in_limit = limit;
+    
+    /* look if we can return w/o syscalls */
+    if ( (rv = sf_extract_line(self, self->in_position, limit)) )
+	return rv;
+    
+    /* make space */
+    if (sf_reshuffle_buffer(self, limit))
+	return PyErr_NoMemory();
+    
+    do {
+	readen = recv(self->fd, self->in_position + self->in_used, 
+		      limit - self->in_used, 0);
+	if (readen == 0) { 
+	    /* no more data : return whatever there is */
+	    rv = PyString_FromStringAndSize(self->in_position, self->in_used);
+	    self->in_used = 0;
+	    self->in_position = self->in_buffer;
+	    return rv;
+	}
+	if (readen == -1) {
+	    if (errno == EAGAIN) {
+		rv = mod_wait_bottom_half(self->fd, COEV_READ, self->iop_timeout);
+		if (!rv)
+		    return rv;
+		Py_DECREF(rv);
+		continue;
+	    }
+	    return PyErr_SetFromErrno(PyExc_CoroSocketError);
+	}
+	    
+	old_position = self->in_position + self->in_used;
+	self->in_used += readen;
+	if ( (rv = sf_extract_line(self, old_position, limit)) )
+	    return rv;
+
+    } while(1);
+}
+
+PyDoc_STRVAR(socketfile_write_doc,
+"write(str) -> None\n\n\
+Write the string to the fd. EPIPE results in an exception.\n\
+");
+static PyObject * 
+socketfile_write(CoroSocketFile *self, PyObject* args) {
+    PyObject *rv;
+    const char *str;
+    Py_ssize_t len, wrote, written, to_write;
+    
+    if (!PyArg_ParseTuple(args, "s#", &str, &len))
+	return NULL;
+
+    written = 0;
+    do {
+	to_write = len - written;
+	wrote = send(self->fd, str + written, to_write, MSG_NOSIGNAL);
+	if (wrote == -1) {
+	    if (errno == EAGAIN) {
+		rv = mod_wait_bottom_half(self->fd, COEV_WRITE, self->iop_timeout);
+		if (!rv)
+		    return rv;
+		Py_DECREF(rv);
+		continue;
+	    }
+	    return PyErr_SetFromErrno(PyExc_CoroSocketError);
+	}
+	written += wrote;
+
+    } while (to_write);
+    
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef socketfile_methods[] = {
+    {"read",  (PyCFunction) socketfile_read,  METH_VARARGS, socketfile_read_doc},
+    {"readline", (PyCFunction) socketfile_readline, METH_VARARGS, socketfile_readline_doc},
+    {"write", (PyCFunction) socketfile_write, METH_VARARGS, socketfile_write_doc},
+    { 0 }
+};
+
+static PyTypeObject CoroSocketFile_Type = {
+    PyObject_HEAD_INIT(NULL)
+    /* ob_size           */ 0,
+    /* tp_name           */ "coev.socketfile",
+    /* tp_basicsize      */ sizeof(CoroSocketFile),
+    /* tp_itemsize       */ 0,
+    /* tp_dealloc        */ (destructor)socketfile_dealloc,
+    /* tp_print          */ 0,
+    /* tp_getattr        */ 0,
+    /* tp_setattr        */ 0,
+    /* tp_compare        */ 0,
+    /* tp_repr           */ 0,
+    /* tp_as_number      */ 0,
+    /* tp_as_sequence    */ 0,
+    /* tp_as_mapping     */ 0,
+    /* tp_hash           */ 0,
+    /* tp_call           */ 0,
+    /* tp_str            */ 0,
+    /* tp_getattro       */ 0,
+    /* tp_setattro       */ 0,
+    /* tp_as_buffer      */ 0,
+    /* tp_flags          */ Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    /* tp_doc            */ socketfile_doc,
+    /* tp_traverse       */ 0,
+    /* tp_clear          */ 0,
+    /* tp_richcompare    */ 0,
+    /* tp_weaklistoffset */ 0,
+    /* tp_iter           */ 0,
+    /* tp_iternext       */ 0,
+    /* tp_methods        */ socketfile_methods,
+    /* tp_members        */ 0,
+    /* tp_getset         */ 0,
+    /* tp_base           */ 0,
+    /* tp_dict           */ 0,
+    /* tp_descr_get      */ 0,
+    /* tp_descr_set      */ 0,
+    /* tp_dictoffset     */ 0,
+    /* tp_init           */ 0,
+    /* tp_alloc          */ 0,
+    /* tp_new            */ socketfile_new
+};
+
 /** Module definition */
 /* FIXME: wait/sleep can possibly leak reference to passed-in value */
 /* FIXME: remember WTH I was thinking when I wrote the above */
@@ -938,7 +1268,6 @@ static PyObject *
 mod_wait(PyObject *a, PyObject* args) {
     int fd, revents;
     double timeout;
-    coerv_t rv;
     
     if (CURCORO->switch_veto) {
         PyErr_SetString(PyExc_CoroSwitchDenied, "mod_wait(): switch prohibited.");
@@ -947,6 +1276,14 @@ mod_wait(PyObject *a, PyObject* args) {
     
     if (!PyArg_ParseTuple(args, "iid", &fd, &revents, &timeout))
 	return NULL;
+    
+    return mod_wait_bottom_half(fd, revents, timeout);
+}
+
+static PyObject *
+mod_wait_bottom_half(int fd, int revents, ev_tstamp timeout) {
+    coerv_t rv;
+    
     coro_dprintf("mod_wait() caller [%s]\n", CURCORO->treepos);
     rv = coev_wait(fd, revents, timeout);
     coro_dprintf("mod_wait() switchback to [%s] rv.status=%d rv.value=%p\n", 
@@ -974,7 +1311,6 @@ mod_wait(PyObject *a, PyObject* args) {
             PyErr_SetString(PyExc_CoroError,
 		    "wait(): unknown switchback type");
             return NULL;
-        
     }
 }
 
@@ -1198,6 +1534,9 @@ initcoev(void) {
     if (PyType_Ready(&CoroLocalData_Type) < 0)
         return;
 
+    if (PyType_Ready(&CoroSocketFile_Type) < 0)
+        return;
+
     { /* add exceptions */
         PyObject* exc_obj;
         PyObject* exc_dict;
@@ -1239,6 +1578,8 @@ initcoev(void) {
     Py_INCREF(&CoroLocalData_Type);
     PyModule_AddObject(m, "local", (PyObject*) &CoroLocalData_Type);
     
+    Py_INCREF(&CoroSocketFile_Type);
+    PyModule_AddObject(m, "socketfile", (PyObject*) &CoroSocketFile_Type);
     {
         /* initialize coev library */
         /* coro_main = PyObject_GC_New(PyCoroutine, &PyCoroutine_Type); */
