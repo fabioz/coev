@@ -73,7 +73,7 @@ def get_pg_config(kind, pg_config="pg_config"):
 class psycoev_build_ext(build_ext):
     """Conditionally complement the setup.cfg options file.
 
-    This class configures the include_dirs, libray_dirs, libraries
+    This class configures the include_dirs, library_dirs, libraries
     options as required by the system. Most of the configuration happens
     in finalize_options() method.
 
@@ -376,10 +376,6 @@ if parser.has_option('build_ext', 'have_ssl'):
     have_ssl = int(parser.get('build_ext', 'have_ssl'))
 else:
     have_ssl = 0
-
-# coev hardcoded here (bleh)
-include_dirs.append('/home/lxnt/prefix/include')
-library_dirs.append('/home/lxnt/prefix/lib')
 
 # build the extension
 
