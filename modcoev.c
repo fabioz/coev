@@ -508,7 +508,7 @@ coro_setrun(PyCoroutine* self, PyObject* nrun, void* c) {
     
     if (debug_flag) {
         PyObject *r = PyObject_Repr(nrun);
-        coro_dprintf("[%s] setrun to %s \n", 
+        coro_dprintf("coro_setrun(): [%s] to %s \n", 
             self->treepos, PyString_AsString(r));
         Py_DECREF(r);
     }
@@ -580,8 +580,8 @@ static PyGetSetDef coro_getsets[] = {
                 (setter) coro_setrun },
     {"parent",  (getter) coro_getparent,
                 (setter) coro_setparent },
-    {"dead",    (getter) coro_getdead }
-    {"posn",   (getter) coro_getpos }
+    {"dead",    (getter) coro_getdead },
+    {"posn",    (getter) coro_getpos },
     { 0 }
 };
 
@@ -1037,15 +1037,16 @@ mod_stats(PyObject *a) {
 
 static PyObject *
 mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {
-    static char *kwds[] = { "trace", "switchdump", NULL };
-    int do_trace = 0;
+    static char *kwds[] = { "module", "library", "switchdump", NULL };
+    int module = 0;
+    int library = 0;
     int do_dump = 0;
     
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, 
-            "i|i:setdebug", kwds, &do_trace, &do_dump))    
+            "|iii:setdebug", kwds, &module, &library, &do_dump))    
 	return NULL;
-    coev_setdebug(do_trace, do_dump);
-    debug_flag = do_trace;
+    coev_setdebug(library, do_dump);
+    debug_flag = module;
     Py_RETURN_NONE;   
 }
 
@@ -1075,9 +1076,10 @@ static PyMethodDef CoevMethods[] = {
         "Returns dict with various counters"
     },
     {   "setdebug", (PyCFunction)mod_setdebug, METH_VARARGS | METH_KEYWORDS, 
-        "coev.setdebug(trace, switchdump) "
-        "trace: print debug; "
-        "switchdump: dump coev_t structures too."
+        "setdebug(module, [library, [switchdump]]) \n"
+        "    module: enable module-level debug output \n"
+        "    library: enable library-level debug output \n"
+        "    switchdump: dump coev_t structures too.\n"
     },
     { 0 }
 };
