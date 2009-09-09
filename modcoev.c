@@ -907,6 +907,15 @@ corolocal_getattro(CoroLocalData *self, PyObject *name)
 
 /** Module definition */
 /* FIXME: wait/sleep can possibly leak reference to passed-in value */
+/* FIXME: remember WTH I was thinking when I wrote the above */
+
+PyDoc_STRVAR(mod_wait_doc,
+"wait(fd, events, timeout) -> None\n\n\
+Switch to scheduler until requested IO event or timeout happens.\n\
+fd -- file descriptor (integer).\n\
+revents -- bitmask.\n\
+timeout -- in seconds.");
+
 static PyObject *
 mod_wait(PyObject *a, PyObject* args) {
     int fd, revents;
@@ -951,6 +960,11 @@ mod_wait(PyObject *a, PyObject* args) {
     }
 }
 
+PyDoc_STRVAR(mod_sleep_doc,
+"sleep(amount) -> None\n\n\
+Switch to scheduler until at least amount seconds pass.\n\
+amount -- number of seconds to sleep.");
+
 static PyObject *
 mod_sleep(PyObject *a, PyObject *args) {
     double timeout;
@@ -993,6 +1007,10 @@ mod_sleep(PyObject *a, PyObject *args) {
     }
 }
 
+PyDoc_STRVAR(mod_scheduler_doc,
+"scheduler() -> None\n\n\
+Run scheduler: dispatch pending IO or timer events");
+
 static PyObject *
 mod_scheduler(PyObject *a) {
     
@@ -1014,12 +1032,20 @@ mod_scheduler(PyObject *a) {
     Py_RETURN_NONE;
 }
 
+PyDoc_STRVAR(mod_current_doc,
+"current() -> coroutine\n\n\
+Return currently executing coroutine object");
+
 static PyObject* 
 mod_current(PyObject *a) {
     PyObject *current = (PyObject *) CURCORO;
     Py_INCREF(current);
     return current; 
 }
+
+PyDoc_STRVAR(mod_stats_doc,
+"stats() -> {...}\n\n\
+Returns a dict of various counters");
 
 static PyObject *
 mod_stats(PyObject *a) {
@@ -1034,6 +1060,12 @@ mod_stats(PyObject *a) {
         "created",      module_stats.created, 
         "destroyed",    module_stats.destroyed );
 }
+
+PyDoc_STRVAR(mod_setdebug_doc,
+"setdebug([module=False, [library=False, [switchdump=False]]]) -> \n\n\
+module -- enable module-level debug output.\n\
+library -- enable library-level debug output \n\
+switchdump -- dump coev_t structures too.\n");
 
 static PyObject *
 mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {
@@ -1051,36 +1083,13 @@ mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {
 }
 
 static PyMethodDef CoevMethods[] = {
-    {   "current", (PyCFunction)mod_current, METH_NOARGS, 
-        "coev.current()\n"
-        "Returns the current coroutine (i.e. the one which called this\n"
-        "function)."
-    },
-    {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS,
-        "coev.scheduler()\n"
-        "Switches to coroutines which called self.wait() "
-        "and have pending IO events"
-    },
-    {   "wait", (PyCFunction)mod_wait, METH_VARARGS,
-        "coev.wait(fd, revents, timeout) "
-        "Sets up a wait for io at fd with switchback to current coro "
-        "and switches to the scheduler if it is running"
-    },
-    {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS,
-        "coev.sleep(amount) "
-        "Sets up a sleep with switchback to current coro "
-        "and switches to the scheduler if it is running"
-    },
-    {   "stats", (PyCFunction)mod_stats, METH_NOARGS, 
-        "coev.stats() "
-        "Returns dict with various counters"
-    },
-    {   "setdebug", (PyCFunction)mod_setdebug, METH_VARARGS | METH_KEYWORDS, 
-        "setdebug(module, [library, [switchdump]]) \n"
-        "    module: enable module-level debug output \n"
-        "    library: enable library-level debug output \n"
-        "    switchdump: dump coev_t structures too.\n"
-    },
+    {   "current", (PyCFunction)mod_current, METH_NOARGS, mod_current_doc },
+    {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS, mod_scheduler_doc },
+    {   "wait", (PyCFunction)mod_wait, METH_VARARGS, mod_wait_doc },
+    {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS, mod_sleep_doc },
+    {   "stats", (PyCFunction)mod_stats, METH_NOARGS, mod_stats_doc },
+    {   "setdebug", (PyCFunction)mod_setdebug, 
+        METH_VARARGS | METH_KEYWORDS, mod_setdebug_doc },
     { 0 }
 };
 
