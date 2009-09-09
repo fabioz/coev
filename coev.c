@@ -501,7 +501,7 @@ coev_initialstub(void *mark) {
         
         if (_fm.debug_output) {
             char *tp = coev_treepos(ts_current);
-            coev_dprintf("[%s] returns %p\n", tp, result);
+            coev_dprintf("coev_initialstub(): [%s] returns %p\n", tp, result);
             _fm.free(tp);
         }
         
