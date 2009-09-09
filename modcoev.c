@@ -599,6 +599,12 @@ static PyNumberMethods coro_as_number = {
     (inquiry) coro_nonzero,     /* nb_nonzero */
 };
 
+PyDoc_STRVAR(coroutine_doc,
+"coroutine([run=None, [parent=None]]) -> coroutine object\n\n\
+Create a new coroutine object (without running it). \n\
+run -- the callable to invoke \n\
+parent -- the parent coroutine, defaults to the current coroutine.");
+
 PyTypeObject PyCoroutine_Type = {
     PyObject_HEAD_INIT(NULL)
     0,					/* ob_size */
@@ -622,10 +628,7 @@ PyTypeObject PyCoroutine_Type = {
     0,					/* tp_setattro */
     0,					/* tp_as_buffer*/
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,	/* tp_flags */
-    "coroutine(run=None, parent=None)\n"
-    "Create a new coroutine object (without running it).  \"run\" is the\n"
-    "callable to invoke, and \"parent\" is the parent coroutine, which\n"
-    "defaults to the current coroutine.",	/* tp_doc */
+    coroutine_doc,                      /* tp_doc */
     coro_traverse,                      /* tp_traverse */
     coro_clear,	                        /* tp_clear */
     0,					/* tp_richcompare */
@@ -679,6 +682,15 @@ typedef struct {
     PyObject *kw;
     PyObject *dict;
 } CoroLocalData;
+
+PyDoc_STRVAR(corolocal_doc,
+"local() -> None\n\n\
+Coroutine-local data.\n\n\
+Closely modelled on (and implementation morphed from) standard library's\n\
+threading._local class.\n\n\
+Notice: while subclassing is allowed, no coroutine switches are allowed\n\
+in subclasses' constructor. Attempt to switch will result in SwitchDenied\n\
+exception.");
 
 static PyObject *
 corolocal_new(PyTypeObject *type, PyObject *args, PyObject *kw) {
@@ -862,7 +874,7 @@ static PyTypeObject CoroLocalData_Type = {
     /* tp_setattro       */ (setattrofunc)corolocal_setattro,
     /* tp_as_buffer      */ 0,
     /* tp_flags          */ Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
-    /* tp_doc            */ "coroutine-local data",
+    /* tp_doc            */ corolocal_doc,
     /* tp_traverse       */ (traverseproc)corolocal_traverse,
     /* tp_clear          */ (inquiry)corolocal_clear,
     /* tp_richcompare    */ 0,
