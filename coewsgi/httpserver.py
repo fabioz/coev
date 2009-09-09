@@ -216,7 +216,7 @@ class CoEvWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
 
 def serve(application, host=None, port=None, handler=None, ssl_pem=None,
           ssl_context=None, server_version=None, protocol_version=None,
-          start_loop=True, socket_timeout=None, coevdebug = (1,0) ):
+          start_loop=True, socket_timeout=None):
     """
     Serves your ``application`` over HTTP(S) via WSGI interface
 
@@ -288,7 +288,6 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
         more closely.
 
     """
-    coev.setdebug(*coevdebug)
     is_ssl = False
     if ssl_pem or ssl_context:
         assert SSL, "pyOpenSSL is not installed"
