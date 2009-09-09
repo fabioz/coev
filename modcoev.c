@@ -42,6 +42,14 @@ static TLS_ATTR int debug_flag;
 #error Python version >= 2.5 is required.
 #endif
 
+/* define some 2.6 stuff that is missing from 2.5 */
+#ifndef Py_TYPE
+#define Py_TYPE(ob)                (((PyObject*)(ob))->ob_type)
+#endif
+#ifndef PyVarObject_HEAD_INIT
+#define PyVarObject_HEAD_INIT(type, size) PyObject_HEAD_INIT(type) size,
+#endif
+
 static PyObject* PyExc_CoroError;
 static PyObject* PyExc_CoroExit;
 static PyObject* PyExc_CoroWakeUp;
