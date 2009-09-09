@@ -38,16 +38,11 @@ Topic :: Software Development :: Libraries :: Python Modules
 """.splitlines()))
 
 REPOSITORY="http://coev.lxnt.info/"
-INCDIR='/home/lxnt/prefix/include'
-LIBDIR='/home/lxnt/prefix/lib'
 
 daext = Extension(
     name='coev', 
     sources=['modcoev.c'], 
-    include_dirs=[INCDIR],
     undef_macros=['NDEBUG'],
-    library_dirs=[LIBDIR],
-    runtime_library_dirs=[LIBDIR],
     libraries=['coev'])
 
 setup(
