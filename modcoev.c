@@ -110,6 +110,9 @@ can be used to kill a single coroutine.\n"
     { 0 }
 };
 
+#define CR_DCHAN        0x01
+#define SF_DCHAN        0x02
+
 static int
 _coro_dprintf(const char *fmt, ...) {
     va_list ap;
@@ -121,7 +124,9 @@ _coro_dprintf(const char *fmt, ...) {
     return rv;
 }
 
-#define coro_dprintf(fmt, args...) do { if (debug_flag) _coro_dprintf(fmt, ## args); } while(0)
+#define coro_dprintf(fmt, args...) do { if (debug_flag & CR_DCHAN) _coro_dprintf(fmt, ## args); } while(0)
+#define sofi_dprintf(fmt, args...) do { if (debug_flag & SF_DCHAN) \
+    _coro_dprintf("sf:" fmt, ## args); } while(0)
 
 static void *
 coro_runner(coev_t *coev, void *p) {
@@ -996,23 +1001,53 @@ socketfile_dealloc(CoroSocketFile *self) {
 static PyObject *
 mod_wait_bottom_half(int fd, int revents, ev_tstamp timeout);
 
-#define INBUF_MAGIC (1<<12)
+static const ssize_t INBUF_MAGIC = 1<<12;
 /** makes some space at the end of the read buffer 
 by either moving occupied space or growing it by reallocating 
 */
+
+
+static void
+dump_buffer_meta(CoroSocketFile *self) {
+    if (debug_flag & SF_DCHAN) {
+        Py_ssize_t top_free, total_free, bottom_free;
+
+        top_free = self->in_position - self->in_buffer;
+        total_free = self->in_allocated - self->in_used;
+        bottom_free = total_free - top_free;
+
+        printf("buffer metadata:\n"
+        "\tbuf=%p pos=%p pos offset %zd\n"
+        "\tallocated=%zd used=%zd limit=%zd\n"
+        "\ttop_free=%zd bottom_free=%zd\ttotal_free=%zd\n",
+            self->in_buffer, self->in_position, self->in_position - self->in_buffer, 
+            self->in_allocated, self->in_used, self->in_limit,
+            top_free, bottom_free, total_free);
+    }
+}
+
+
 static int
 sf_reshuffle_buffer(CoroSocketFile *self, Py_ssize_t needed) {
     Py_ssize_t top_free, total_free;
     
     top_free = self->in_position - self->in_buffer;
     total_free = self->in_allocated - self->in_used;
+
+    sofi_dprintf("sf_reshuffle_buffer(*,%zd):\n", needed);
+    dump_buffer_meta(self);
     
-    if (total_free - top_free > needed) 
+    if (total_free - top_free >= needed)
+    /* required space is available at the bottom */
 	return 0;
-    
-    if (needed > total_free - 2 * INBUF_MAGIC) {
-	/* reallocation imminent */
-	Py_ssize_t newsize = INBUF_MAGIC + ((needed - total_free) & (INBUF_MAGIC - 1));
+
+    sofi_dprintf("sf_reshuffle_buffer(*,%zd): %zd > %zd ?\n", 
+        needed, needed + 2 * INBUF_MAGIC, total_free);
+    if (needed + 2 * INBUF_MAGIC > total_free ) {
+	/* reallocation imminent - grow by at most 2*INBUF_MAGIC more than needed */
+	Py_ssize_t newsize = (self->in_used + needed + 2*INBUF_MAGIC) & (~(INBUF_MAGIC-1));
+        if (newsize > self->in_limit)
+            self->in_limit = newsize;
 	char *newbuf = PyMem_Realloc(self->in_buffer, newsize);
 	if (!newbuf) {
 	/* memmove imminent */
@@ -1023,15 +1058,22 @@ sf_reshuffle_buffer(CoroSocketFile *self, Py_ssize_t needed) {
 	    PyMem_Free(self->in_buffer);
 	    self->in_position = self->in_buffer = newbuf;
 	    self->in_allocated = newsize;
-	    if (newsize > self->in_limit)
-		self->in_limit = newsize;
+            sofi_dprintf("sf_reshuffle_buffer(*,%zd): realloc failed, newsize %zd\n:", 
+                needed, self->in_allocated);
+            dump_buffer_meta(self);
 	    return 0;
 	}
+        self->in_allocated = newsize;
+        sofi_dprintf("sf_reshuffle_buffer(*,%zd): realloc successful: newsize=%zd\n", 
+            needed, self->in_allocated);
     }
     /* we're still have 2*INBUF_MAGIC bytes more than needed */
     
     memmove(self->in_buffer, self->in_position, self->in_used);
     self->in_position = self->in_buffer;
+
+    sofi_dprintf("sf_reshuffle_buffer(*,%zd): after realloc and/or move\n", needed);
+    dump_buffer_meta(self);
     
     return 0;
 }
@@ -1053,6 +1095,8 @@ socketfile_read(CoroSocketFile *self, PyObject* args) {
     if (len == 0) 
 	return PyErr_SetString(PyExc_ValueError, "Read size must be positive"), NULL;
     
+    
+    sofi_dprintf("read(): %zd bytes requested, checking buffer\n", len);
     /* check if we have enough contigous space in buffer */
     if (sf_reshuffle_buffer(self, len)) 
 	return PyErr_NoMemory();
@@ -1063,11 +1107,16 @@ socketfile_read(CoroSocketFile *self, PyObject* args) {
 	    rv = PyString_FromStringAndSize(self->in_position, len);
 	    self->in_used -= len;
 	    self->in_position += len;
+            if (self->in_used == 0)
+                self->in_position = self->in_buffer;
 	    return rv;
 	}
 	
 	readen = recv(self->fd, self->in_position + self->in_used, 
 	              len - self->in_used, 0);
+        sofi_dprintf("read(): %zd bytes read into %p, reqd len %zd\n", 
+            readen, self->in_position + self->in_used, len - self->in_used);
+        
 	if (readen == -1) {
 	    if (errno == EAGAIN) {
 		rv = mod_wait_bottom_half(self->fd, COEV_READ, self->iop_timeout);
@@ -1082,6 +1131,7 @@ socketfile_read(CoroSocketFile *self, PyObject* args) {
 	    len = self->in_used; /* return whatever we managed to read. */
 	else
 	    self->in_used += readen;
+        dump_buffer_meta(self);
     } while (1);
 }
 
@@ -1129,7 +1179,8 @@ socketfile_readline(CoroSocketFile *self, PyObject* args) {
     
     if (!limit)
 	return PyErr_SetString(PyExc_ValueError, "Line size limit must be positive"), NULL;
-    
+    sofi_dprintf("readline(): sizehint %zd bytes buflimit %zd bytes\n", 
+        limit, self->in_limit);
     if (limit > self->in_limit)
 	self->in_limit = limit;
     
@@ -1144,6 +1195,9 @@ socketfile_readline(CoroSocketFile *self, PyObject* args) {
     do {
 	readen = recv(self->fd, self->in_position + self->in_used, 
 		      limit - self->in_used, 0);
+        sofi_dprintf("readline: %zd bytes read into %p, reqd len %zd\n", 
+                readen, self->in_position + self->in_used, 
+		      limit - self->in_used);
 	if (readen == 0) { 
 	    /* no more data : return whatever there is */
 	    rv = PyString_FromStringAndSize(self->in_position, self->in_used);
@@ -1164,6 +1218,7 @@ socketfile_readline(CoroSocketFile *self, PyObject* args) {
 	    
 	old_position = self->in_position + self->in_used;
 	self->in_used += readen;
+        dump_buffer_meta(self);
 	if ( (rv = sf_extract_line(self, old_position, limit)) )
 	    return rv;
 
@@ -1204,10 +1259,27 @@ socketfile_write(CoroSocketFile *self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+PyDoc_STRVAR(socketfile_flush_doc,
+"flush() -> None\n\n\
+Noop.\n\
+");
+
+PyDoc_STRVAR(socketfile_close_doc,
+"close() -> None\n\n\
+Noop.\n\
+");
+
+static PyObject *
+socketfile_noop(PyObject *self) {
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef socketfile_methods[] = {
     {"read",  (PyCFunction) socketfile_read,  METH_VARARGS, socketfile_read_doc},
     {"readline", (PyCFunction) socketfile_readline, METH_VARARGS, socketfile_readline_doc},
     {"write", (PyCFunction) socketfile_write, METH_VARARGS, socketfile_write_doc},
+    {"flush", (PyCFunction) socketfile_noop, METH_NOARGS, socketfile_flush_doc},
+    {"close", (PyCFunction) socketfile_noop, METH_NOARGS, socketfile_close_doc},
     { 0 }
 };
 
@@ -1588,5 +1660,4 @@ initcoev(void) {
         coro_main->treepos = coev_treepos(&coro_main->coev);
         coro_main->switch_veto = 0;
     }
-    
 }
