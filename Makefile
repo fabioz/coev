@@ -3,15 +3,17 @@ PREFIX?=~/prefix
 
 #CFLAGS+=-pthread -DTHREADING_MADNESS
 
-all: libcoev.so
+SONAME=libucoev.so
 
-libcoev.so: coev.c coev.h
-	gcc ${CFLAGS} -c coev.c 
-	gcc -shared -Wl,-soname,libcoev.so -o libcoev.so coev.o -lev -lc
+all: ${SONAME}
+
+${SONAME}: ucoev.c ucoev.h
+	gcc ${CFLAGS} -c ucoev.c 
+	gcc -shared -Wl,-soname,${SONAME} -o ${SONAME} ucoev.o -lev -lc
 
 clean:
 	rm -f libcoev.so coev.o
 
 install: clean all
-	install -D libcoev.so ${PREFIX}/lib
-	install -D coev.h ${PREFIX}/include
+	install -D ${SONAME} ${PREFIX}/lib/${SONAME}
+	install -D ucoev.h ${PREFIX}/include/ucoev.h
