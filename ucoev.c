@@ -20,11 +20,8 @@
 #ifdef THREADING_MADNESS
 #define TLS_ATTR __thread
 #define CROSSTHREAD_CHECK(target, rv) \
-    if (pthread_equal(ts_current->thread, (target)->thread)) { \
-	_fm.crossthread_fail(ts_current, (target), (p)); \
-	return NULL; \
-    }
-
+    if (pthread_equal(ts_current->thread, (target)->thread)) \
+        _fm.abort("crossthread switch prohibited");
 #else
 #define TLS_ATTR
 #define CROSSTHREAD_CHECK(target, rv)
@@ -272,8 +269,6 @@ coev_switch(coev_t *target) {
     }
     
     if (_fm.debug_output) {
-        if (_fm.switch_notify)
-            _fm.switch_notify(origin, target);
         coev_dprintf("coev_switch(): from [%s] to [%s]\n", 
 	    origin->treepos, target->treepos);
         coev_dump("switch, origin", origin);
@@ -353,10 +348,6 @@ coev_initialstub(void) {
     coev_t *parent;
     
     self->run(self);
-
-    /* signal death to the framework */
-    if (_fm.death)
-        _fm.death(self);
     
     /* clean up any scheduler stuff */
     coev_sched_cleanup(self);

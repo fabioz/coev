@@ -142,16 +142,6 @@ typedef struct _coev_framework_methods {
     void *(*realloc)(void *, size_t); 
     void  (*free)(void *);
     
-    /* exceptions */
-    /* prohibited cross-thread operation */
-    void (*crossthread_fail)(coev_t *, coev_t *);
-    
-    /* switch to self */
-    void (*switch2self)(coev_t *);
-    
-    /* called after run() returns */
-    void (*death)(coev_t *);
-    
     /* total failure: must not return. */
     void (*abort)(const char *);
     
@@ -160,9 +150,6 @@ typedef struct _coev_framework_methods {
 
     /* handle SIGINT (or NULL to ignore) */
     void (*inthdlr)(void);
-    
-    /* switch debug: called just before any switch */
-    void (*switch_notify)(coev_t *, coev_t *);
     
     /* debug output collector */
     int (*dprintf)(const char *format, ...);
