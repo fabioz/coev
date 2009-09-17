@@ -9,10 +9,10 @@ all: ${SONAME}
 
 ${SONAME}: ucoev.c ucoev.h
 	gcc ${CFLAGS} -c ucoev.c 
-	gcc -shared -Wl,-soname,${SONAME} -o ${SONAME} ucoev.o -lev -lc
+	gcc -shared -Wl,-soname,${SONAME} -Wl,-R${PREFIX}/lib -o ${SONAME} ucoev.o -lev -lc
 
 clean:
-	rm -f libcoev.so coev.o
+	rm -f ${SONAME} *.o
 
 install: clean all
 	install -D ${SONAME} ${PREFIX}/lib/${SONAME}

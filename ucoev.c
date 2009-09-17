@@ -1,9 +1,8 @@
 /* 
- * Bare-C io-scheduled coroutines: based on greenlet module
+ * Bare-C io-scheduled coroutines: based on ucontext libc support.
  *
  * Authors: 
- *      Armin Rigo, Christian Tismer (greenlet module)
- *      Alexander Sabourenkov  (C/Python split, ioscheduler)
+ *      Alexander Sabourenkov
  *
  * License: MIT License
  *
@@ -12,85 +11,11 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/mman.h>
+#include <ucontext.h>
+#include <errno.h>
 
 #include "ucoev.h"
-
-/***********************************************************
-
-Note: comments are mostly left verbatim from the original code.
-PyGreenlet is now named coev_t, and greenlet is another name for 
-coroutine.
-
-
-A PyGreenlet is a range of C stack addresses that must be
-saved and restored in such a way that the full range of the
-stack contains valid data when we switch to it.
-
-Stack layout for a greenlet:
-
-               |     ^^^       |
-               |  older data   |
-               |               |
-  stack_stop . |_______________|
-        .      |               |
-        .      | greenlet data |
-        .      |   in stack    |
-        .    * |_______________| . .  _____________  stack_copy + stack_saved
-        .      |               |     |             |
-        .      |     data      |     |greenlet data|
-        .      |   unrelated   |     |    saved    |
-        .      |      to       |     |   in heap   |
- stack_start . |     this      | . . |_____________| stack_copy
-               |   greenlet    |
-               |               |
-               |  newer data   |
-               |     vvv       |
-
-
-Note that a greenlet's stack data is typically partly at its correct
-place in the stack, and partly saved away in the heap, but always in
-the above configuration: two blocks, the more recent one in the heap
-and the older one still in the stack (either block may be empty).
-
-Greenlets are chained: each points to the previous greenlet, which is
-the one that owns the data currently in the C stack above my
-stack_stop.  The currently running greenlet is the first element of
-this chain.  The main (initial) greenlet is the last one.  Greenlets
-whose stack is entirely in the heap can be skipped from the chain.
-
-The chain is not related to execution order, but only to the order
-in which bits of C stack happen to belong to greenlets at a particular
-point in time.
-
-The main greenlet doesn't have a stack_stop: it is responsible for the
-complete rest of the C stack, and we don't know where it begins.  We
-use (char*) -1, the largest possible address.
-
-States:
-  stack_stop == NULL && stack_start == NULL:  did not start yet
-  stack_stop != NULL && stack_start == NULL:  already finished
-  stack_stop != NULL && stack_start != NULL:  active
-
-The running greenlet's stack_start is undefined but not NULL.
-
- ***********************************************************/
-
-/*** global state ***/
-
-/* In the presence of multithreading, this is a bit tricky:
-
-   - ts_current always store a reference to a greenlet, but it is
-     not really the current greenlet after a thread switch occurred.
-
-   - each *running* greenlet uses its run_info field to know which
-     thread it is attached to.  A greenlet can only run in the thread
-     where it was created.  This run_info is a ref to tstate->dict.
-
-   - the thread state dict is used to save and restore ts_current,
-     using the dictionary key 'ts_curkey'.
-     
-   we basically store all context in thread-locals (because thread state dict
-    is now out of scope with the rest of python stuff */
 
 #ifdef THREADING_MADNESS
 #define TLS_ATTR __thread
@@ -106,71 +31,125 @@ The running greenlet's stack_start is undefined but not NULL.
 #endif
 
 /* The current greenlet in this thread state (holds a reference) */
-static TLS_ATTR coev_t *ts_current;
-/* Holds a reference to the switching-from stack during the slp switch */
-static TLS_ATTR coev_t *ts_origin;
-/* Holds a reference to the switching-to stack during the slp switch */
-static TLS_ATTR coev_t *ts_target;
-/* NULL if error, otherwise args tuple to pass around during slp switch */
-static TLS_ATTR void *ts_passaround;
+static TLS_ATTR volatile coev_t *ts_current;
 
-static TLS_ATTR int ts_count;
+static TLS_ATTR volatile int ts_count;
 
 static TLS_ATTR coev_t *ts_root;
 
-/* flag to signal that this switch is from scheduler */
-static TLS_ATTR int ts_switch_from_scheduler;
-
 static coev_frameth_t _fm;
+
+static TLS_ATTR
+struct _coev_scheduler_stuff {
+    coev_t *scheduler;
+    struct ev_loop *loop;
+    struct ev_signal intsig;
+    coev_t *runq_head;
+    coev_t *runq_tail;
+} ts_scheduler;
 
 #define coev_dprintf(fmt, args...) do { if (_fm.debug_output) _fm.dprintf(fmt, ## args); } while(0)
 #define coev_dump(msg, coev) do { if (_fm.dump_coevs) _coev_dump(msg, coev); } while(0)
 
-
+static void update_treepos(coev_t *);
 static void sleep_callback(struct ev_loop *, ev_timer *, int );
 static void iotimeout_callback(struct ev_loop *, ev_timer *, int );
 
-/** initialize a root greenlet for a thread */
+/** initialize a root coroutine for a thread */
 static void
 coev_init_root(coev_t *root) {
+    void *sp;
+    size_t ROOT_STACK_SIZE = 42*4096;
+    
     if (ts_current != NULL) 
         _fm.abort("coev_init_root(): second initialization refused.");
+    
     ts_current = root;
     ts_root = root;
-    /* set parent et al to zero/NULL */
-    memset(ts_current, 0, sizeof(coev_t));
-    ts_current->stack_start = (char*) 1;
-    ts_current->stack_stop = (char*) -1;
-#ifdef THREADING_MADNESS
-    ts_current->thread = pthread_self();
-#endif
-    ts_current->id = 0;
-    ts_current->state = CSTATE_CURRENT;
-    ts_current->parent = NULL;
+
+    memset(root, 0, sizeof(coev_t));
     
-    ev_timer_init(&ts_current->io_timer, iotimeout_callback, 23., 42.);
-    ev_timer_init(&ts_current->sleep_timer, sleep_callback, 23., 42.);
+    root->parent = NULL;
+    root->run = NULL;
+    root->id = 0;
+    root->state = CSTATE_CURRENT;
+    root->status = CSW_NONE;
+    root->next = NULL;
+    root->ran_out_of_order = 0;
+
+    sp = mmap(NULL, ROOT_STACK_SIZE, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); 
+    
+    if (sp == MAP_FAILED)
+        _fm.eabort("coev_init_root(): mmap() stack allocation failed", errno);
+    
+    root->ctx.uc_stack.ss_sp = sp;
+    root->ctx.uc_stack.ss_flags = 0;
+    root->ctx.uc_stack.ss_size = ROOT_STACK_SIZE;
+    
+    
+    ev_timer_init(&root->io_timer, iotimeout_callback, 23., 42.);
+    ev_timer_init(&root->sleep_timer, sleep_callback, 23., 42.);
+    
+    update_treepos(root);
+    
+#ifdef THREADING_MADNESS
+    root->thread = pthread_self();
+#endif
 }
 
+/** universal runner */
+static void coev_initialstub(void);
+
+/** initialize coev_t structure.
+Note: stack is allocated using anonymous mmap, so be generous, it won't
+eat physical memory until needed */
 void
-coev_init(coev_t *child, void *(*run)(coev_t *self, void *)) {
+coev_init(coev_t *child, coev_runner_t runner, size_t stacksize) {
+    void *sp;
+
     if (ts_current == NULL)
         _fm.abort("coev_init(): library not initialized");
     
+    if (stacksize < SIGSTKSZ)
+        _fm.abort("coev_init(): stack size too small (less than SIGSTKSZ)");
+    
+    sp = mmap(NULL, stacksize, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); 
+    
+    if (sp == MAP_FAILED)
+        _fm.eabort("coev_init(): mmap() stack allocation failed", errno);
+    
     memset(child, 0, sizeof(coev_t));
-    child->parent = ts_current;
-    child->run = run;
+    
+    if (getcontext(&child->ctx))
+	_fm.eabort("coev_init(): getcontext() failed", errno);
+    
+    child->ctx.uc_stack.ss_sp = sp;
+    child->ctx.uc_stack.ss_flags = 0;
+    child->ctx.uc_stack.ss_size = stacksize;
+    child->ctx.uc_link = &(((coev_t*)ts_current)->ctx);
+    
+    makecontext(&child->ctx, coev_initialstub, 0);
+    
     child->id = ts_count++;
+    child->parent = (coev_t*)ts_current;
+    update_treepos(child);
+    child->run = runner;
     child->state = CSTATE_INIT;
+    child->status = CSW_NONE;
+    child->next = NULL;
+    child->ran_out_of_order = 0;
+    
     ev_timer_init(&child->io_timer, iotimeout_callback, 23., 42.);
     ev_timer_init(&child->sleep_timer, sleep_callback, 23., 42.);
-    /* rest of initialization will occur at switch time */
 }
 
 void
 coev_free(coev_t *corpse) {
-    if (corpse->stack_copy)
-        _fm.free(corpse->stack_copy);
+    if (corpse->ctx.uc_stack.ss_sp)
+        if (munmap(corpse->ctx.uc_stack.ss_sp, corpse->ctx.uc_stack.ss_size))
+            _fm.abort("coev_free(): munmap failed.");
+    if (corpse->treepos)
+	_fm.free(corpse->treepos);
 }
 
 #define MAX_CHARS_PER_LEVEL 12
@@ -180,8 +159,8 @@ static TLS_ATTR char tp_scrpad[MAX_CHARS_PER_LEVEL*MAX_LEVELS_REPORTED + 4];
 
 
 /* returns memory allocated with init-time supplied allocator */
-char *
-coev_treepos(coev_t *coio) {
+static void
+update_treepos(coev_t *coio) {
     coev_t *c = coio;
     int rvlen;
     char *rv;
@@ -194,340 +173,216 @@ coev_treepos(coev_t *coio) {
     rvlen = 1;
     while (c) {
         written = snprintf(tp_onebuf, sizeof(tp_onebuf), " %d", c->id);
-        memcpy(curpos - written, tp_onebuf, written);
+        memmove(curpos - written, tp_onebuf, written);
         curpos -= written;
         rvlen += written;
         c = c->parent;
     }
     rv = _fm.malloc(rvlen);
-    if (rv)
-        memcpy(rv, curpos+1, rvlen-1); /* strip leading space */
-    return rv;
+    if (!rv)
+	_fm.abort("treepos(): memory allocation failed.");
+    memmove(rv, curpos+1, rvlen-1); /* strip leading space */
+    coio->treepos = rv;
+}
+
+const char *
+coev_treepos(coev_t *coio) {
+    return coio->treepos;
 }
 
 coev_t *
 coev_current(void) {
-    return ts_current;
+    return (coev_t*)ts_current;
+}
+
+static const char* 
+str_coev_state[] = {
+    "INIT     ",
+    "CURRENT  ",
+    "RUNNABLE ",
+    "SCHEDULED",
+    "IOWAIT   ",
+    "SLEEP    ",
+    "DEAD     "
+};
+
+static const char* 
+str_coev_status[] = {
+    "NONE     ",
+    "VOLUNTARY",
+    "EVENT    ",
+    "WAKEUP   ",
+    "TIMEOUT  ",
+    "SIGCHLD  ",
+    "YIELD    ",
+    "NOWHERE_TO_SWITCH",
+    "SCHEDULER_NEEDED ",
+    "WAIT_IN_SCHEDULER",
+    "SWITCH_TO_SELF   "
+};
+
+const char* 
+coev_state(coev_t *c) {
+    return str_coev_state[c->state];
+}
+
+const char* 
+coev_status(coev_t *c) {
+    return str_coev_status[c->status];
 }
 
 
 static void
 _coev_dump(char *m, coev_t *c) { 
-    char *tp;
-    
     if (m) 
         coev_dprintf("%s\n", m);
-    tp = coev_treepos(c);
-    coev_dprintf( "coev_t<%p> (current<%p> root<%p>:\n"
-            "    treepos: [%s]\n"
+    coev_dprintf( "coev_t<%p> [%s] %s, %s (current<%p> root<%p>):\n"
             "    is_current: %d\n"
-            "    is_root: %d\n"
-            "    is_started: %d\n"
-            "    is_active: %d\n"
-            "    stack_start: %p\n"
-            "    stack_stop: %p\n"
-            "    stack_copy: %p\n"
-            "    stack_saved: %ld\n"
-            "    stack_prev: %p\n"
-            "    parent: %p\n"
-            "    run: %p\n"
-            "    state: %d\n"
+            "    is_root:    %d\n"
+            "    is_sched:   %d\n"
+            "    parent:     %p\n"
+            "    run:        %p\n"
             "    io watcher  active=%d pending=%d\n"
             "    io timeout  active=%d pending=%d\n"
             "    sleep timer active=%d pending=%d\n",
-        c,
-        ts_current,
-        ts_root,
-        tp,
+        c, c->treepos, str_coev_state[c->state], 
+        str_coev_status[c->status],
+        (coev_t*)ts_current, ts_root,
         c == ts_current,
         c == ts_root,
-        COEV_STARTED(c),
-        COEV_ACTIVE(c),
-        c->stack_start,
-        c->stack_stop,
-        c->stack_copy,
-        c->stack_saved,
-        c->stack_prev,
+        c == ts_scheduler.scheduler,
         c->parent,
         c->run,
-        c->state,
         ev_is_active(&c->watcher), ev_is_pending(&c->watcher),
         ev_is_active(&c->io_timer), ev_is_pending(&c->io_timer),
         ev_is_active(&c->sleep_timer), ev_is_pending(&c->sleep_timer)
         );
-    fflush(stdout);
-    _fm.free(tp);
-}
-
-static int
-coev_save(coev_t *g, char *stop) {
-    /* Save more of g's stack into the heap -- at least up to 'stop'
-
-       g->stack_stop |________|
-		     |        |
-		     |    __ stop       . . . . .
-		     |        |    ==>  .       .
-		     |________|          _______
-		     |        |         |       |
-		     |        |         |       |
-      g->stack_start |        |         |_______| g->stack_copy
-
-     */
-    long sz1 = g->stack_saved;
-    long sz2 = stop - g->stack_start;
-
-    if (sz2 > sz1) {
-	char *c = _fm.realloc(g->stack_copy, sz2);
-	if (!c)
-	    return -1;
-	
-	memcpy(c+sz1, g->stack_start+sz1, sz2-sz1);
-	g->stack_copy = c;
-	g->stack_saved = sz2;
-        _fm.c_bytes_copied += sz2-sz1;
-    }
-    return 0;
-}
-
-static void 
-slp_restore_state(void)
-{
-    coev_t* g = ts_target;
-    
-    /* Restore the heap copy back into the C stack */
-    if (g->stack_saved != 0) {
-	memcpy(g->stack_start, g->stack_copy, g->stack_saved);
-        _fm.c_bytes_copied += g->stack_saved;
-	_fm.free(g->stack_copy);
-	g->stack_copy = NULL;
-	g->stack_saved = 0;
-    }
-    if (ts_current->stack_stop == g->stack_stop)
-	g->stack_prev = ts_current->stack_prev;
-    else
-	g->stack_prev = ts_current;
-}
-
-static int 
-slp_save_state(char* stackref)
-{
-    /* must free all the C stack up to target_stop */
-    char* target_stop = ts_target->stack_stop;
-    
-    if (ts_current->stack_start == NULL)
-	ts_current = ts_current->stack_prev;  /* not saved if dying */
-    else
-	ts_current->stack_start = stackref;
-    
-    while (ts_current->stack_stop < target_stop) {
-	/* ts_current is entirely within the area to free */
-	if (coev_save(ts_current, ts_current->stack_stop))
-	    return -1;  /* XXX */
-	ts_current = ts_current->stack_prev;
-    }
-    if (ts_current != ts_target) {
-	if (coev_save(ts_current, target_stop))
-	    return -1;  /* XXX */
-    }
-    return 0;
-}
-
-/*
- * the following macros are spliced into the OS/compiler
- * specific code, in order to simplify maintenance.
- */
-
-#define SLP_SAVE_STATE(stackref, stsizediff)		\
-  stackref += STACK_MAGIC;				\
-  if (slp_save_state((char*)stackref)) return -1;	\
-  if (!COEV_ACTIVE(ts_target)) return 1;		\
-  stsizediff = ts_target->stack_start - (char*)stackref
-
-#define SLP_RESTORE_STATE()			\
-  slp_restore_state()
-
-
-#define SLP_EVAL
-#include "slp_platformselect.h"
-
-#ifndef STACK_MAGIC
-#error "evgreenlet needs to be ported to this platform,\
- or teached how to detect your compiler properly."
-#endif /* !STACK_MAGIC */
-
-
-/* This is a trick to prevent the compiler from inlining or
-   removing the frames */
-int (*_coev_slp_switch) (void);
-int (*_coev_switchstack) (void);
-void (*_coev_initialstub) (void *);
-
-static int 
-coev_switchstack(void)
-{
-    /* perform a stack switch according to some global variables
-       that must be set before:
-       - ts_current: current greenlet (holds a reference)
-       - ts_target: greenlet to switch to
-       - ts_passaround: NULL if PyErr_Occurred(),
-		 else a tuple of args sent to ts_target (holds a reference)
-    */
-    int rv;
-    
-    ts_origin = ts_current;
-    rv = _coev_slp_switch(); 
-    if (rv < 0)
-	/* error */
-	ts_passaround = NULL;
-    else
-	ts_current = ts_target;
-    
-    return rv;
 }
 
 /** entry point: function for voluntary switching between coroutines */
-coerv_t
-coev_switch(coev_t *target, void *p) {
+void
+coev_switch(coev_t *target) {
+    coev_t *origin = (coev_t*)ts_current;
     CROSSTHREAD_CHECK(target, p);
     
-    if (target == ts_current) {
-        coerv_t rv;
-        rv.status = COERV_SWITCH_TO_SELF;
-        rv.value  = NULL;
-        rv.from   = ts_current;
-        return rv;
+    if (target == origin) {
+        target->status = CSW_SWITCH_TO_SELF;
+        target->origin = origin;
+        return;
     }
     
     if (_fm.debug_output) {
-        char *s, *t;
-        
         if (_fm.switch_notify)
-            _fm.switch_notify(ts_current, target, ts_switch_from_scheduler);
-        s = coev_treepos(ts_current);
-        t = coev_treepos(target);
-        coev_dprintf("coev_switch(): from [%s] to [%s]; wait %d\n", 
-            s, t, ts_switch_from_scheduler);
-        _fm.free(s);
-        _fm.free(t);
-        coev_dump("switch, current", ts_current);
+            _fm.switch_notify(origin, target);
+        coev_dprintf("coev_switch(): from [%s] to [%s]\n", 
+	    origin->treepos, target->treepos);
+        coev_dump("switch, origin", origin);
         coev_dump("switch, target", target);        
     }
     
-    ts_passaround = p;
+    /* find the real target by ignoring dead coroutines */
+    while ((target != NULL) && (target->state == CSTATE_DEAD))
+        target = target->parent;
+    
+    if (!target)
+        _fm.abort("coev_switch(): everyone's dead, how come?");
+    
+    target->origin = origin;
+    origin->state = CSTATE_RUNNABLE;
+    target->status = CSW_VOLUNTARY;
+    target->state = CSTATE_CURRENT;
+    target->status = CSW_VOLUNTARY;
+    ts_current = target;
     _fm.c_switches++;
     
-    /* if this is a voluntary switch, set status here. */
-    if (ts_current->state == CSTATE_CURRENT)
-        ts_current->state = CSTATE_IDLE;
+    if (swapcontext(&origin->ctx, &target->ctx) == -1)
+        _fm.abort("coev_switch(): swapcontext() failed.");
     
-    /* find the real target by ignoring dead greenlets,
-       and if necessary starting a greenlet. */
-    while (1) {
-	if (COEV_ACTIVE(target)) {
-            target->state = CSTATE_CURRENT;
-	    ts_target = target;
-            if (_fm.debug_output) {
-                char *tp = coev_treepos(target);
-                coev_dprintf("coev_switch(): actual target is [%s] (ACTIVE)\n", tp);
-                _fm.free(tp);
-            }
-	    _coev_switchstack();
-            {
-                coerv_t rv;
-                rv.from = ts_origin;
-                rv.value = ts_passaround;
-                rv.status = ts_switch_from_scheduler;
-                return rv;
-            }
-	}
-	if (!COEV_STARTED(target)) {
-	    void *dummymarker;
-            target->state = CSTATE_CURRENT;
-	    ts_target = target;
-            if (_fm.debug_output) {
-                char *tp = coev_treepos(target);
-                coev_dprintf("coev_switch(): actual target is [%s] (STARTED)\n", tp);
-                _fm.free(tp);
-            }
-	    _coev_initialstub(&dummymarker);
-            {
-                coerv_t rv;
-                rv.from = ts_origin;
-                rv.value = ts_passaround;
-                rv.status = ts_switch_from_scheduler;
-                return rv;
-            }
-	}
-	target = target->parent;
+    /*  we're here if swapcontext() returned w/o error:
+        that means a switch back.
+    
+        It was originated either by switch() or by
+        initialstub() exiting and calling setcontext().
+    
+        In the former case (some other switch), 
+        ts_current is defined, and ts_current->switch_rv
+        has been set up so we just return.
+    
+        In the latter case ts_current is defined also,
+        ts_current->switch_rv.status = CSW_SIGCHLD
+        ts_current->switch_rv.value = (void *)corpse;
+        so we just return.
+    
+     */
+}
+
+static void
+coev_scheduled_switch(coev_t *target) {
+    coev_t *origin;
+    
+    origin = (coev_t *)ts_current;
+
+    coev_dprintf("coev_scheduled_switch(): from [%s] %s %s to [%s] %s %s\n",
+	    origin->treepos, str_coev_state[origin->state], str_coev_status[origin->status],
+            target->treepos, str_coev_state[target->state], str_coev_status[target->status]);
+    
+    if (ts_scheduler.scheduler == NULL)
+        _fm.abort("coev_scheduled_switch(): ts_scheduler == NULL");
+    if ((ts_scheduler.scheduler != origin) && (ts_scheduler.scheduler != target))
+        _fm.abort("coev_scheduled_switch(): ts_scheduler != origin nor target");
+    if (target == origin)
+        _fm.abort("coev_scheduled_switch(): target == origin");
+    if (target->state == CSTATE_DEAD) {
+        /* target's dead. do nothing. */
+        coev_dprintf("coev_scheduled_switch(): target->state == CSTATE_DEAD");
+        return;
     }
+    target->origin = origin;
+    ts_current = target;
+
+    if (swapcontext(&origin->ctx, &target->ctx) == -1)
+        _fm.abort("coev_scheduled_switch(): swapcontext() failed.");
 }
 
 static void coev_sched_cleanup(coev_t *);
-/** the first function to run in the greenlet after its activation */
+
+/** the first and last function that runs in the coroutine */
 static void 
-coev_initialstub(void *mark) {
-    int err;
-
-    /* ts_target->run is the function to call in the new greenlet */
-    if (!ts_target)
-        _fm.abort("coev_initialstub(): ts_target is NULL");
-    if (!ts_target->run)
-        _fm.abort("coev_initialstub(): ts_target has no runner");
+coev_initialstub(void) {
+    coev_t *self = (coev_t*)ts_current;
+    coev_t *parent;
     
-    /* start the greenlet */
-    ts_target->stack_start = NULL;
-    ts_target->stack_stop = (char *) mark;
-    if (ts_current->stack_start == NULL)    /* ts_current is dying WTF? */
-	ts_target->stack_prev = ts_current->stack_prev;
-    else
-	ts_target->stack_prev = ts_current;
+    self->run(self);
 
-    coev_dump("coev_initialstub(), target, pre-switchstack", ts_target);
-    err = _coev_switchstack();
-    /* returns twice!
-       The 1st time with err=1: we are in the new greenlet
-       The 2nd time with err=0: back in the caller's greenlet
-    */
-    if (err == 1) {
-	/* in the new greenlet */
-	void *result;
-	void *args  = ts_passaround;
-	ts_current->stack_start = (char *) 1;  /* running */
+    /* signal death to the framework */
+    if (_fm.death)
+        _fm.death(self);
+    
+    /* clean up any scheduler stuff */
+    coev_sched_cleanup(self);
+    
+    self->state = CSTATE_DEAD;
+    
+    /* perform explicit switch to parent */
+    parent = self->parent;
+    /* set up link to exit to */
+    while ((parent != NULL) && (parent->state == CSTATE_DEAD))
+        parent = parent->parent;
+    
+    if (!parent)
+        _fm.abort("coev_initialstub(): everyone's dead, how come?");
 
-	if (args == NULL)    /* pending exception */
-	    result = NULL;
-	else 
-	    result = ts_current->run(ts_current, args);
-        
-        if (_fm.debug_output) {
-            char *tp = coev_treepos(ts_current);
-            coev_dprintf("coev_initialstub(): [%s] returns %p\n", tp, result);
-            _fm.free(tp);
-        }
-        
-	/* signal death to the framework */
-	if (_fm.death)
-	    _fm.death(ts_current);
-	
-	/* clean up any scheduler stuff */
-	coev_sched_cleanup(ts_current);
-	
-	/* jump back to parent */
-	ts_current->stack_start = NULL;  /* dead */
-	coev_switch(ts_current->parent, result);
-	/* must not return from here! */
-	_fm.abort("coroutines cannot continue");
-    }
-    /* back in the parent */
+    parent->status = CSW_SIGCHLD;
+    parent->origin = self;
+    
+    /* that's it. */
+    ts_current = parent;
+    setcontext(&parent->ctx);
+    
+    _fm.abort("coev_initialstub(): setcontext() returned. This cannot be.");
 }
 
 /* ioscheduler functions */
-static
-struct _coev_scheduler_stuff {
-    coev_t *scheduler;
-    struct ev_loop *loop;
-    struct ev_signal intsig;
-} ts_scheduler;
 
 /** for some reason there's a problem with signals.
     so by default we handle SIGINT by stopping the loop
@@ -539,8 +394,105 @@ intsig_cb(struct ev_loop *loop, ev_signal *w, int signum) {
 
 static void
 coev_sched_cleanup(coev_t *corpse) {
+    
+    
+    coev_dprintf("coev_sched_cleanup() [%s]: watcher %d/%d iotimer %d/%d sleep_timer %d/%d\n",
+        corpse->treepos, 
+        ev_is_active(&corpse->watcher), ev_is_pending(&corpse->watcher),
+        ev_is_active(&corpse->io_timer), ev_is_pending(&corpse->io_timer),
+        ev_is_active(&corpse->sleep_timer), ev_is_pending(&corpse->sleep_timer));
+    
+    /* stop io watcher */
     ev_io_stop(ts_scheduler.loop, &corpse->watcher);
-    /* FIXME ev_timer_stop or something */
+    
+    /* stop timers */
+    ev_timer_stop(ts_scheduler.loop, &corpse->io_timer);
+    ev_timer_stop(ts_scheduler.loop, &corpse->sleep_timer);
+    
+    /* remove from the runq */
+    if ( ts_scheduler.runq_head == corpse ) {
+	ts_scheduler.runq_head = corpse->next;
+	return;
+    }
+    {
+	coev_t *t = ts_scheduler.runq_head;
+	while (t) {
+	    if (t->next == corpse) {
+		t->next = corpse->next;
+		return;
+	    }
+	    t = t->next;
+	}
+    }
+}
+
+static int coev_runq_append(coev_t *);
+
+static void
+dump_runqueue(const char *header) {
+    coev_t *next = ts_scheduler.runq_head;
+    coev_dprintf("%s\n", header);
+    
+    if (!next)
+        coev_dprintf("    RUNQUEUE EMPTY\n");
+    
+    while (next) {
+        coev_dprintf("    <%p> [%s] %s %s\n", next, next->treepos,
+            str_coev_state[next->state], str_coev_status[next->status] );
+        if (next == next->next)
+            _fm.abort("dump_runqueue(): runqueue loop detected");
+        next = next->next;
+    }
+}
+
+int
+coev_schedule(coev_t *waiter) {    
+    switch(waiter->state) {
+        case CSTATE_DEAD:
+            return CSCHED_DEADMEAT;
+        
+        case CSTATE_IOWAIT:
+        case CSTATE_SLEEP:
+        case CSTATE_SCHEDULED:
+            return CSCHED_ALREADY;
+        
+        case CSTATE_CURRENT:
+            if (ts_scheduler.scheduler == NULL)
+                return CSCHED_NOSCHEDULER;
+            break;
+            
+        case CSTATE_RUNNABLE:
+        case CSTATE_INIT:
+            break;
+        default: 
+            _fm.abort("coev_schedule(): invalid coev_t::state");
+    }
+    
+    waiter->status = CSW_YIELD;
+    coev_runq_append(waiter);
+    if (waiter->state == CSTATE_CURRENT) {
+        waiter->state = CSTATE_SCHEDULED;
+        coev_switch(ts_scheduler.scheduler);
+    } else {
+        waiter->state = CSTATE_SCHEDULED;
+    }
+    return 0;
+    
+}
+
+static int
+coev_runq_append(coev_t *waiter) {
+    waiter->next = NULL;
+    
+    if (ts_scheduler.runq_tail != NULL)
+	ts_scheduler.runq_tail->next = waiter;
+    
+    ts_scheduler.runq_tail = waiter;    
+	
+    if (ts_scheduler.runq_head == NULL)
+	ts_scheduler.runq_head = waiter;
+    
+    return 0;
 }
 
 /* in your io_scheduler, stopping your watcher, switching to your waiter */
@@ -548,9 +500,12 @@ static void
 io_callback(struct ev_loop *loop, ev_io *w, int revents) {
     coev_t *waiter = (coev_t *) ( ((char *)w) - offsetof(coev_t, watcher) );
     ev_io_stop(loop, w);
+    ev_timer_stop(ts_scheduler.loop, &waiter->io_timer);
     
-    ts_switch_from_scheduler = COERV_EVENT;
-    coev_switch(waiter, NULL);
+    waiter->state = CSTATE_RUNNABLE;
+    waiter->status = CSW_EVENT;
+    
+    coev_runq_append(waiter);
 }
 
 static void
@@ -559,110 +514,192 @@ iotimeout_callback(struct ev_loop *loop, ev_timer *w, int revents) {
 
     ev_io_stop(ts_scheduler.loop, &waiter->watcher);
     ev_timer_stop(ts_scheduler.loop, w);
-    ts_switch_from_scheduler = COERV_TIMEOUT; /* this is timeout */
-    coev_switch(waiter, NULL); 
+    
+    waiter->state = CSTATE_RUNNABLE;
+    waiter->status = CSW_TIMEOUT; /* this is timeout */
+    
+    coev_runq_append(waiter);
 }
 
 static void
 sleep_callback(struct ev_loop *loop, ev_timer *w, int revents) {
     coev_t *waiter = (coev_t *) ( ((char *)w) - offsetof(coev_t, sleep_timer) );
 
-    ts_switch_from_scheduler = COERV_EVENT; /* this is scheduled */
-    coev_switch(waiter, NULL); 
+    waiter->state = CSTATE_RUNNABLE;
+    waiter->status = CSW_WAKEUP; /* this is scheduled */
+
+    coev_runq_append(waiter);
 }
 
 /* sets current coro to wait for revents on fd, switches to scheduler */
-coerv_t 
+void 
 coev_wait(int fd, int revents, ev_tstamp timeout) {
-    coerv_t rv;
-    coev_t *target;
+    coev_t *target, *self;
     
-    if (ts_current == ts_scheduler.scheduler) {
-        rv.from = NULL;
-        rv.value = NULL;
-        rv.status = COERV_WAIT_IN_SCHEDULER;
-        return rv;
+    self = (coev_t*)ts_current;
+    
+    if (self == ts_scheduler.scheduler) {
+        self->origin = self;
+        self->status = CSW_WAIT_IN_SCHEDULER;
+        return;
     }
     
-    ts_current->io_timer.repeat = timeout;
-    ev_timer_again(ts_scheduler.loop, &ts_current->io_timer);
-    
-    ev_io_init(&ts_current->watcher, io_callback, fd, revents);
-    ev_io_start(ts_scheduler.loop, &ts_current->watcher);
-
-    _fm.c_waits++;
+    coev_dprintf("coev_wait(): [%s] %s %s scheduler [%s], self->parent [%s]\n", 
+        self->treepos,  str_coev_state[self->state], 
+        str_coev_status[self->status],
+        ts_scheduler.scheduler ? ts_scheduler.scheduler->treepos : "none", 
+        self->parent ? self->parent->treepos : "none");
     
     if (ts_scheduler.scheduler) {
         target = ts_scheduler.scheduler;
-    } else if (ts_current->parent) {
-        target = ts_current->parent;
-        ts_switch_from_scheduler = COERV_SCHEDULER_NEEDED;
+        target->status = CSW_YIELD;
+	target->origin = self;
+    } else if (self->parent) {
+        target = self->parent;
+        target->status = CSW_SCHEDULER_NEEDED;
+	target->origin = self;
     } else {
         /* epic fail: nowhere to switch. */
-        rv.status = COERV_NOWHERE_TO_SWITCH;
-        rv.value = NULL;
-        rv.from = NULL;
-        ts_switch_from_scheduler = 0;
-        return rv;
+        coev_dprintf("coev_wait(): epic fail: nowhere to switch\n");
+        self->origin = self;
+        self->status = CSW_NOWHERE_TO_SWITCH;
+        return;
     }
     
-    ts_current->state = CSTATE_IOWAIT;
-    rv = coev_switch(target, NULL);
+    if ((fd == -1) && (revents == 0)) {
+        /* this is sleep */
+        self->sleep_timer.repeat = timeout;
+        ev_timer_again(ts_scheduler.loop, &self->sleep_timer);
+        _fm.c_sleeps++;
+        self->state = CSTATE_SLEEP;
+    } else {
+        /* this is iowait */
+        self->io_timer.repeat = timeout;
+        ev_timer_again(ts_scheduler.loop, &self->io_timer);
+        
+        if (ev_is_active(&self->watcher)) {
+            /* oh shi.... */
+            coev_dprintf("coev_wait(): io watcher already active for [%s]\n", self->treepos);
+        } else {
+            ev_io_init(&self->watcher, io_callback, fd, revents);
+            ev_io_start(ts_scheduler.loop, &self->watcher);
+        }
+        _fm.c_waits++;
     
-    if (   (rv.status == COERV_EVENT) 
-        || (rv.status == COERV_VOLUNTARY)) {
-        /* handle I/O event or switch2wait */
-        ev_timer_stop(ts_scheduler.loop, &ts_current->io_timer);
+        self->state = CSTATE_IOWAIT;
     }
-    ts_switch_from_scheduler = 0;
-    return rv;
+
+    coev_scheduled_switch(target);
+    
+    self = (coev_t*)ts_current;
+    /* we're here either because scheduler switched back
+       or someone is being rude. */
+    
+    if (   (self->status != CSW_EVENT)
+	&& (self->status != CSW_WAKEUP)
+        && (self->status != CSW_TIMEOUT)) {
+	/* someone's being rude. */
+        coev_dprintf("coev_wait(): [%s]/%s is being rude to [%s] %s %s\n",
+            self->origin->treepos, str_coev_state[self->origin->state],
+            self->treepos, str_coev_state[self->state], 
+            str_coev_status[self->status]);
+        self->ran_out_of_order = 1;
+    }
 }
 
-coerv_t
+void
 coev_sleep(ev_tstamp amount) {
-    coerv_t rv;
-    coev_t *target;
-    
-    ts_current->sleep_timer.repeat = amount;
-    
-    ev_timer_again(ts_scheduler.loop, &ts_current->sleep_timer);
-    _fm.c_sleeps++;
-
-    if (ts_scheduler.scheduler) {
-        target = ts_scheduler.scheduler;
-    } else if (ts_current->parent) {
-        target = ts_current->parent;
-        ts_switch_from_scheduler = COERV_SCHEDULER_NEEDED;
-    } else {
-        /* epic fail: nowhere to switch. */
-        rv.status = COERV_NOWHERE_TO_SWITCH;
-        rv.value = NULL;
-        rv.from = NULL;
-        ts_switch_from_scheduler = 0;
-        return rv;
-    }
-    
-    ts_current->state = CSTATE_SLEEP;
-    rv = coev_switch(target, NULL);
-    if  (rv.status == COERV_VOLUNTARY) {
-        /* handle switch2sleep */
-        ev_timer_stop(ts_scheduler.loop, &ts_current->sleep_timer);
-    }
-    ts_switch_from_scheduler = 0;
-    return rv;
+    coev_wait(-1, 0, amount);
 }
+
+/*  the scheduler
+    
+    this should switch to coroutines in order they received IO events 
+
+    ts_scheduler.runq_head:
+	NULL if no events, first to handle 
+	if at least one event was received.
+
+    ts_scheduler.runq_tail:
+	undefined if runq_head == NULL.
+	most recent coroutie to receieve an event otherwise.
+	
+    coev_t::next: iff this coroutine was not last to receive an
+	event, points to next one.
+
+    runqueue is managed thus:
+    -- append always at tail
+    -- scheduler walks always from head
+    -- if tail != NULL, tail->next == NULL, head != NULL
+    -- if head == NULL, tail == NULL, queue is empty.
+
+*/
 
 void 
-coev_loop(int flags) {
+coev_loop(void) {
+    coev_dprintf("coev_loop(): scheduler entered.\n");
+    
     if (ts_scheduler.scheduler == ts_current)
         _fm.abort("recursive call of coev_loop()");
-    ts_scheduler.scheduler = ts_current;
-    ev_loop(ts_scheduler.loop, flags);
+    
+    ts_scheduler.scheduler = (coev_t*)ts_current;
+    
+    do {
+	coev_t *target, *self, *runq_head;
+
+        ev_loop(ts_scheduler.loop, 0);
+	
+        dump_runqueue("coev_loop(): runqueue after ev_loop");
+        
+	if (ts_scheduler.runq_head == NULL) {
+	    coev_dprintf("coev_loop(): no events were scheduled.\n");
+	    break;
+	}
+        /* guard against infinite loop in scheduler in case something 
+           schedules itself over and over */
+	runq_head = ts_scheduler.runq_head;
+        ts_scheduler.runq_head = ts_scheduler.runq_tail = NULL;
+        
+        coev_dprintf("coev_loop(): dispatching pending events.\n");
+        
+	while ((target = runq_head)) {
+            coev_dprintf("coev_loop(): runqueue run: target %p head %p next %p\n", target, runq_head, target->next);
+	    runq_head = target->next;
+            if (runq_head == target)
+                _fm.abort("coev_loop(): runqueue loop detected");
+	    target->next = NULL;
+            if (target->ran_out_of_order) {
+                target->ran_out_of_order = 0;
+                coev_dprintf("coev_loop(): target [%s] ran out of order: skipping.\n", target->treepos);
+                continue;
+            }
+	    coev_scheduled_switch(target);
+            self = (coev_t *)ts_current;
+            switch (self->status) {
+                case CSW_YIELD:
+                    coev_dprintf("coev_loop(): yield from %p [%s]\n", self->origin, self->origin->treepos);
+                    continue;
+                case CSW_SIGCHLD:
+                    coev_dprintf("coev_loop(): sigchld from %p [%s]\n", self->origin, self->origin->treepos);
+                    continue;
+                case CSW_SWITCH_TO_SELF:
+                    _fm.abort("scheduler wound up in the runq");
+                default:
+                    coev_dprintf("Unexpected switch to scheduler\n");
+                    coev_dump("origin", self->origin); 
+                    coev_dump("self", self);
+                    _fm.abort("unexpected switch to scheduler");
+            }
+	}
+	coev_dprintf("coev_loop(): event dispatch finished.\n");
+    } while(1);
+    
+    ts_scheduler.scheduler = NULL;
+    coev_dprintf("coev_loop(): scheduler exited.\n");
 }
 
 void
 coev_unloop(void) {
-    ts_scheduler.scheduler = NULL;
     ev_unloop(ts_scheduler.loop, EVUNLOOP_ALL);
 }
 
@@ -680,11 +717,24 @@ coev_setdebug(int debug, int dump) {
     _fm.dump_coevs = dump;
 }
 
+int 
+coev_setparent(coev_t *target, coev_t *newparent) {
+    coev_t *p;
+    
+    for (p = newparent; p; p = p->next)
+	if ( p == target )
+	    return -1;
+
+    target->parent = newparent;
+    update_treepos(target);
+    return 0;
+}
+
 void 
-coev_initialize(const coev_frameth_t *fm, coev_t *root) {
+coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     /* multiple calls will result in havoc */
     if (ts_count != 0)
-        _fm.abort("coev_initialize(): second initialization refused.");
+        _fm.abort("coev_libinit(): second initialization refused.");
     
     ts_count = 1;
     
@@ -695,12 +745,10 @@ coev_initialize(const coev_frameth_t *fm, coev_t *root) {
     _fm.c_waits = 0;
     _fm.c_sleeps = 0;
     
-    _coev_switchstack	= coev_switchstack;
-    _coev_slp_switch	= slp_switch;
-    _coev_initialstub	= coev_initialstub;
-    
     ts_scheduler.loop = ev_default_loop(0);
     ts_scheduler.scheduler = NULL;
+    ts_scheduler.runq_head = NULL;
+    ts_scheduler.runq_tail = NULL;
     
     if (_fm.inthdlr) {
         ev_signal_init(&ts_scheduler.intsig, intsig_cb, SIGINT);
