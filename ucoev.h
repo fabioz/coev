@@ -1,9 +1,8 @@
 /* 
- * Bare-C io-scheduled coroutines: based on greenlet module
+ * Bare-C io-scheduled coroutines: based on ucontext libc support.
  *
  * Authors: 
- *      Armin Rigo, Christian Tismer (greenlet module)
- *      Alexander Sabourenkov  (C/Python split, ioscheduler)
+ *      Alexander Sabourenkov
  *
  * License: MIT License
  *
