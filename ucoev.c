@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <ucontext.h>
 #include <errno.h>
 
@@ -27,13 +28,14 @@
 #define CROSSTHREAD_CHECK(target, rv)
 #endif
 
-/* The current greenlet in this thread state (holds a reference) */
+struct _coev_lock_bunch;
+typedef struct _coev_lock_bunch colbunch_t;
+
 static TLS_ATTR volatile coev_t *ts_current;
-
 static TLS_ATTR volatile int ts_count;
-
 static TLS_ATTR coev_t *ts_root;
-
+static TLS_ATTR colbunch_t *ts_rootlockbunch;
+static TLS_ATTR long ts_cls_last_key;
 static coev_frameth_t _fm;
 
 static TLS_ATTR
@@ -45,19 +47,29 @@ struct _coev_scheduler_stuff {
     coev_t *runq_tail;
 } ts_scheduler;
 
-#define coev_dprintf(fmt, args...) do { if (_fm.debug_output) _fm.dprintf(fmt, ## args); } while(0)
-#define coev_dump(msg, coev) do { if (_fm.dump_coevs) _coev_dump(msg, coev); } while(0)
+#define cgen_dprintf(t, fmt, args...) do { if (_fm.debug & t) \
+    _fm.dprintf(fmt, ## args); } while(0)
+
+#define coev_dprintf(fmt, args...) do { if (_fm.debug & CDF_COEV) \
+    _fm.dprintf(fmt, ## args); } while(0)
+
+#define coev_dump(msg, coev) do { if (_fm.debug & CDF_COEV_DUMP) \
+    _coev_dump(msg, coev); } while(0)
+
+#define cnrb_dprintf(fmt, args...) do { if (_fm.debug & CDF_NBUF) \
+    _fm.dprintf(fmt, ## args); } while(0)
+
+#define cnrb_dump(nbuf) do { if (_fm.debug & CDF_NBUF_DUMP) \
+    _cnrb_dump(nbuf); } while(0)
+
 
 static void update_treepos(coev_t *);
 static void sleep_callback(struct ev_loop *, ev_timer *, int );
 static void iotimeout_callback(struct ev_loop *, ev_timer *, int );
 
-/** initialize a root coroutine for a thread */
+/** initialize the root coroutine */
 static void
 coev_init_root(coev_t *root) {
-    void *sp;
-    size_t ROOT_STACK_SIZE = 42*4096;
-    
     if (ts_current != NULL) 
         _fm.abort("coev_init_root(): second initialization refused.");
     
@@ -74,15 +86,22 @@ coev_init_root(coev_t *root) {
     root->next = NULL;
     root->ran_out_of_order = 0;
 
-    sp = mmap(NULL, ROOT_STACK_SIZE, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); 
-    
-    if (sp == MAP_FAILED)
-        _fm.eabort("coev_init_root(): mmap() stack allocation failed", errno);
-    
-    root->ctx.uc_stack.ss_sp = sp;
-    root->ctx.uc_stack.ss_flags = 0;
-    root->ctx.uc_stack.ss_size = ROOT_STACK_SIZE;
-    
+#if 0 
+    /* seems like this is not needed at all. */
+    {
+	size_t ROOT_STACK_SIZE = 42*4096;
+	void *sp;
+
+	sp = mmap(NULL, ROOT_STACK_SIZE, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); 
+	
+	if (sp == MAP_FAILED)
+	    _fm.eabort("coev_init_root(): mmap() stack allocation failed", errno);
+	
+	root->ctx.uc_stack.ss_sp = sp;
+	root->ctx.uc_stack.ss_flags = 0;
+	root->ctx.uc_stack.ss_size = ROOT_STACK_SIZE;
+    }
+#endif
     
     ev_timer_init(&root->io_timer, iotimeout_callback, 23., 42.);
     ev_timer_init(&root->sleep_timer, sleep_callback, 23., 42.);
@@ -232,8 +251,8 @@ coev_status(coev_t *c) {
 static void
 _coev_dump(char *m, coev_t *c) { 
     if (m) 
-        coev_dprintf("%s\n", m);
-    coev_dprintf( "coev_t<%p> [%s] %s, %s (current<%p> root<%p>):\n"
+        _fm.dprintf("%s\n", m);
+    _fm.dprintf( "coev_t<%p> [%s] %s, %s (current<%p> root<%p>):\n"
             "    is_current: %d\n"
             "    is_root:    %d\n"
             "    is_sched:   %d\n"
@@ -268,12 +287,11 @@ coev_switch(coev_t *target) {
         return;
     }
     
-    if (_fm.debug_output) {
-        coev_dprintf("coev_switch(): from [%s] to [%s]\n", 
-	    origin->treepos, target->treepos);
-        coev_dump("switch, origin", origin);
-        coev_dump("switch, target", target);        
-    }
+
+    coev_dprintf("coev_switch(): from [%s] to [%s]\n", 
+	origin->treepos, target->treepos);
+    coev_dump("switch, origin", origin);
+    coev_dump("switch, target", target);        
     
     /* find the real target by ignoring dead coroutines */
     while ((target != NULL) && (target->state == CSTATE_DEAD))
@@ -469,6 +487,13 @@ coev_schedule(coev_t *waiter) {
     }
     return 0;
     
+}
+
+void
+coev_stall(void) {
+    coev_schedule((coev_t *)ts_current);
+    if (CSW_ERROR(ts_current))
+	_fm.abort("coev_stall(): coev_schedule() returned with error status");
 }
 
 static int
@@ -694,6 +719,550 @@ coev_unloop(void) {
     ev_unloop(ts_scheduler.loop, EVUNLOOP_ALL);
 }
 
+struct _coev_lock_bunch {
+    colbunch_t *next;  /* in case we run out of space */
+    colock_t *avail;   /* freed locks are stuffed here */
+    colock_t *used;    /* allocated locks are stuffed here */
+    colock_t *area;    /* what to free() */
+    size_t allocated;  /* tracking how much was allocated (in colock count) */
+};
+
+/* iff *bunch is NULL, we allocate the struct itself */
+static void 
+colock_bunch_init(colbunch_t **bunch_p) {
+    colbunch_t *bunch = *bunch_p;
+    
+    if (bunch == NULL) {
+	bunch = _fm.malloc(sizeof(colbunch_t));
+	if (bunch == NULL)
+	    _fm.abort("ENOMEM allocating lockbunch");
+    }
+	
+    bunch->area = _fm.malloc(sizeof(colock_t) * COLOCK_PREALLOCATE);
+    
+    if (bunch->area == NULL)
+	_fm.abort("ENOMEM allocating lock area");	
+    
+    memset(bunch->area, 0, sizeof(colock_t) * COLOCK_PREALLOCATE);
+    bunch->allocated =  COLOCK_PREALLOCATE;
+    bunch->avail = bunch->area;
+    {
+        int i;
+        
+        for(i=1; i < COLOCK_PREALLOCATE; i++)
+            bunch->area[i-1].next = &(bunch->area[i]);
+    }
+    
+    *bunch_p = bunch;
+}
+
+static void 
+colock_bunch_fini(colbunch_t *b) {
+    colbunch_t *c = b, *p;
+    
+    while (c) {
+	p = c;
+	c = c->next;
+	_fm.free(p);
+    }
+}
+
+colock_t *
+colock_allocate(void) {
+    colock_t *lock;
+    colbunch_t *bunch = ts_rootlockbunch;
+    
+    while (!bunch->avail) {
+	/* woo, we're out of locks in this bunch, get another */
+	coev_dprintf("colock_allocate(): bunch %p full\n", bunch);
+	if (!bunch->next) {
+	    /* WOO, that was last one. allocate another */
+	    coev_dprintf("colock_allocate(): all bunches full, allocating another\n", bunch);
+	    colock_bunch_init(&bunch->next);
+	    bunch = bunch->next;
+	    break;
+	}
+	bunch = bunch->next;
+    }
+    
+    lock = bunch->avail;
+    
+    bunch->avail = lock->next;
+    lock->next = bunch->used;
+    bunch->used = lock;
+    lock->owner = coev_current();
+
+    coev_dprintf("colock_allocate() -> %p\n", lock);
+    return (void *) lock;
+}
+
+void 
+colock_free(colock_t *lock) {
+    colock_t *prev;
+    colbunch_t *bunch = ts_rootlockbunch;
+    
+    lock->owner = NULL; /* pity the fools supplying null pointers */
+    
+    if (bunch->next) { /* if we have >1 bunch out there .. */
+	while (bunch) { 
+	    /* pointer magic is so pointer */
+	    if (   (lock > bunch->area) 
+		&& ( (lock - bunch->area) < bunch->allocated) )
+		    /* gotcha */
+		    break;
+	    bunch = bunch->next;
+	}
+    }
+    
+    if (!bunch)
+	_fm.abort("Attempt to free non-existent lock");
+    
+    prev = bunch->used;
+    if ( lock != prev ) {
+	/* find previous lock in the used list */
+	while (prev->next != lock) {
+	    if (prev->next == NULL) 
+		_fm.abort("Whoa, colbunch_t at %p is corrupted!");
+	    prev = prev->next;
+	}
+    }   
+    
+    /* snatch it off used list */
+    prev->next = lock->next;
+    
+    /* put it at the top of free list */
+    lock->next = bunch->avail;
+    bunch->avail = lock;
+}
+
+void 
+colock_acquire(colock_t *p) {
+    while (p->owner) {
+	/* the promised dire insults */
+	coev_dprintf("%p attemtps to acquire lock %p that was not released by %p",
+	    ts_current, p, p->owner);
+	
+	coev_stall();
+    }
+    p->owner = (coev_t *)ts_current;
+}
+
+void 
+colock_release(colock_t *p) {
+    coev_dprintf("%p releases lock %p that was acquired by %p", 
+	ts_current, p, p->owner);
+    p->owner = NULL; 
+}
+
+/*  Coroutine-local storage is designed to satisfy perverse semantics 
+    that Python/thread.c expects. Go figure.
+    
+    key value of 0 means this slot is not used. 0 is never returned 
+    by cls_allocate().
+*/
+#define CLS_FREE_SLOT 0L
+
+long 
+cls_new(void) {
+    ts_cls_last_key++;
+    return ts_cls_last_key;
+}
+
+static void
+cls_keychain_init(cokeychain_t **kc) {
+    if (*kc == NULL) {
+	*kc = _fm.malloc(sizeof(cokeychain_t));
+	if (*kc == NULL) 
+	    _fm.abort("ENOMEM allocating new keychain");
+    }
+    memset(*kc, 0, sizeof(cokeychain_t));
+}
+
+static void 
+cls_keychain_fini(cokeychain_t *kc) {
+    cokeychain_t *c = kc, *p;
+    
+    while (c) {
+	p = c;
+	c = c->next;
+	_fm.free(p);
+    }
+}
+
+static cokey_t *
+cls_find(long k) {
+    cokeychain_t *kc = &( ((coev_t *)ts_current)->kc);
+    int i;
+    
+    while (kc) {
+	for (i = 0; i<CLS_KEYCHAIN_SIZE; i++)
+	    if (kc->keys[i].key == k)
+		return &(kc->keys[i]);
+	kc = kc->next;
+    }
+
+    if (k == 0) {
+	/* this was an attempt to find a free slot */
+	kc = NULL;
+	
+	cls_keychain_init(&kc);
+	if (ts_current->kc_tail)
+	    ts_current->kc_tail->next = kc;
+	else
+	    ts_current->kc_tail = kc;
+	return &(kc->keys[0]);
+    }
+    
+    return NULL;
+}
+
+void *
+cls_get(long k) {
+    cokey_t *t;
+    t = cls_find(k);
+    if (t)
+	return t->value;
+    return NULL;
+}
+
+int
+cls_set(long k, void *v) {
+    cokeychain_t *kc = &( ((coev_t *)ts_current)->kc);
+    int i;
+
+    while (kc) {
+	for (i = 0; i<CLS_KEYCHAIN_SIZE; i++)
+	    if (kc->keys[i].key == 0) {
+		kc->keys[i].key = k;
+		kc->keys[i].value = v;
+		return 0;
+	    }
+	kc = kc->next;
+    }
+    return -1;
+}
+    
+void
+cls_del(long k) {
+    cokey_t *t;
+    
+    t = cls_find(k);
+    if (t)
+	t->key = CLS_FREE_SLOT;
+}
+
+void
+cls_drop_all(void) {
+    cokeychain_t *kc = &( ((coev_t *)ts_current)->kc);
+
+    cls_keychain_fini(kc->next);
+    cls_keychain_init(&kc);
+}
+
+/* used in buf growth calculations */
+static const ssize_t CNRBUF_MAGIC = 1<<12;
+
+
+void 
+cnrbuf_init(cnrbuf_t *self, int fd, double timeout, size_t prealloc, size_t rlim) {
+    self->in_allocated = prealloc;
+    self->in_limit = 0;
+    self->iop_timeout = timeout;
+    self->in_buffer = _fm.malloc(self->in_allocated);
+    
+    if (!self->in_buffer)
+	_fm.abort("cnrbuf_init(): No memory for me!");
+    self->in_position = self->in_buffer;
+}
+
+void 
+cnrbuf_fini(cnrbuf_t *buf) {
+    _fm.free(buf->in_buffer);
+}
+
+static void
+_cnrb_dump(cnrbuf_t *self) {
+    ssize_t top_free, total_free, bottom_free;
+
+    top_free = self->in_position - self->in_buffer;
+    total_free = self->in_allocated - self->in_used;
+    bottom_free = total_free - top_free;
+
+    _fm.dprintf("buffer metadata:\n"
+    "\tbuf=%p pos=%p pos offset %zd\n"
+    "\tallocated=%zd used=%zd limit=%zd\n"
+    "\ttop_free=%zd bottom_free=%zd\ttotal_free=%zd\n",
+	self->in_buffer, self->in_position, self->in_position - self->in_buffer, 
+	self->in_allocated, self->in_used, self->in_limit,
+	top_free, bottom_free, total_free);
+}
+
+/** makes some space at the end of the read buffer 
+by either moving occupied space or growing it by reallocating 
+*/
+static int
+sf_reshuffle_buffer(cnrbuf_t *self, ssize_t needed) {
+    ssize_t top_free, total_free;
+    
+    top_free = self->in_position - self->in_buffer;
+    total_free = self->in_allocated - self->in_used;
+
+    cnrb_dprintf("sf_reshuffle_buffer(*,%zd):\n", needed);
+    cnrb_dump(self);
+    
+    if (total_free - top_free >= needed)
+    /* required space is available at the bottom */
+	return 0;
+
+    cnrb_dprintf("sf_reshuffle_buffer(*,%zd): %zd > %zd ?\n", 
+        needed, needed + 2 * CNRBUF_MAGIC, total_free);
+    if (needed + 2 * CNRBUF_MAGIC > total_free ) {
+	/* reallocation imminent - grow by at most 2*CNRBUF_MAGIC more than needed */
+	ssize_t newsize = (self->in_used + needed + 2*CNRBUF_MAGIC) & (~(CNRBUF_MAGIC-1));
+        if (newsize > self->in_limit)
+            self->in_limit = newsize;
+	char *newbuf = _fm.realloc(self->in_buffer, newsize);
+	if (!newbuf) {
+	/* memmove imminent */
+	    newbuf = _fm.malloc(newsize);
+	    if (!newbuf)
+		return -1; /* no memory */
+	    memmove(newbuf, self->in_position, self->in_used);
+	    _fm.free(self->in_buffer);
+	    self->in_position = self->in_buffer = newbuf;
+	    self->in_allocated = newsize;
+            coev_dprintf("sf_reshuffle_buffer(*,%zd): realloc failed, newsize %zd\n:", 
+                needed, self->in_allocated);
+            cnrb_dump(self);
+	    return 0;
+	}
+        self->in_allocated = newsize;
+        cnrb_dprintf("sf_reshuffle_buffer(*,%zd): realloc successful: newsize=%zd\n", 
+            needed, self->in_allocated);
+    }
+    /* we're still have 2*CNRBUF_MAGIC bytes more than needed */
+    
+    memmove(self->in_buffer, self->in_position, self->in_used);
+    self->in_position = self->in_buffer;
+
+    cnrb_dprintf("sf_reshuffle_buffer(*,%zd): after realloc and/or move\n", needed);
+    cnrb_dump(self);
+    
+    return 0;
+}
+
+ssize_t 
+cnrbuf_read(cnrbuf_t *self,void **p, ssize_t sizehint) {
+    ssize_t rv;
+    
+    if (self->waiting_for_io)
+        return -2;
+    
+    cnrb_dprintf("cnrbuf_read(): fd=%d sizehint %zd bytes buflimit %zd bytes\n", 
+        self->fd, sizehint, self->in_limit);
+    
+    if (sizehint > self->in_limit)
+        self->in_limit = sizehint;
+
+    do {
+        ssize_t readen, to_read;    
+
+	if (( sizehint > 0) && (self->in_used >= sizehint )) {
+	    *p = self->in_position;
+	    rv = sizehint;
+	    self->in_used -= sizehint;
+	    self->in_position += sizehint;
+	    if (self->in_used == 0)
+		self->in_position = self->in_buffer;
+	    return rv;
+	}    
+        
+        if ( sizehint > 0 )
+            to_read = sizehint - self->in_used;
+        else
+            if ( self->in_used + 2 * CNRBUF_MAGIC < self->in_limit )
+                to_read = 2 * CNRBUF_MAGIC;
+            else 
+                to_read = self->in_limit - self->in_used;            
+    
+        if ( sf_reshuffle_buffer(self, to_read) )
+            _fm.abort("cnrbuf_read(): No memory to reshuffle buffer");
+        	
+	readen = recv(self->fd, self->in_position + self->in_used, to_read, 0);
+        cnrb_dprintf("cnrbuf_read(): %zd bytes read into %p, reqd len %zd\n", 
+            readen, self->in_position + self->in_used, to_read);
+        
+	if (readen == -1) {
+	    if (errno == EAGAIN) {
+		coev_wait(self->fd, COEV_READ, self->iop_timeout);
+		if (ts_current->status != CSW_EVENT)
+		    return -1;
+		continue;
+	    }
+	    return -1;
+	}
+	if (readen == 0)
+	    sizehint = self->in_used; /* return whatever we managed to read. */
+	else
+	    self->in_used += readen;
+        if ((readen == 0) && (self->in_used == 0)) { /* read nothing. */
+            return 0;
+        }
+        cnrb_dump(self);
+    } while (1);
+}
+
+/* returns:
+    len of line extracted if all is ok.
+    0 - need more data, and buffer limit/size hint allow.
+*/
+ssize_t
+sf_extract_line(cnrbuf_t *self, const char *startfrom, void **p, ssize_t sizehint) {
+    char *culprit;
+    char *data_end;
+    ssize_t len;
+    
+    data_end = self->in_position + self->in_used;
+    len = data_end - startfrom;
+    
+    cnrb_dprintf("sf_extract_line(): fd=%d len=%zd, sizehint=%zd in_limit=%zd\n", 
+        self->fd, len, sizehint, self->in_limit);
+    
+    if ( len > 0 ) {
+        /* have some unscanned data, try it */
+        culprit = memchr(startfrom, '\n', len);
+        
+        if (culprit) {
+            len = culprit - self->in_position + 1;
+            cnrb_dprintf("sf_extract_line(): fd=%d found."
+            " culprit=%p len=%d\n", self->fd, culprit, len);
+            
+	    *p = self->in_position;
+            self->in_used -= len;
+            if (self->in_used == 0)
+                self->in_position = self->in_buffer;
+            else    
+                self->in_position += len;
+            cnrb_dprintf("buffer meta after extraction:\n");
+            cnrb_dump(self);
+            return len;
+        }
+    }
+    /* at this point:
+       len = 0, or len > 0, but no luck with LF -> len is effectively 0 */
+    
+    /* now decide if we're allowed to read more data from the fd*/
+    if ( sizehint ) {
+        /* bound by explicit sizehint */
+        if (self->in_used < sizehint) 
+            return -1;
+    } else {
+        /* bound by buffer size limit */
+        if (self->in_allocated < self->in_limit)
+            return -1;
+    }
+    
+    /* we're over the line length limit - return what we've got so far */
+    len = self->in_used;
+    *p = self->in_position;
+    
+    self->in_used = 0;
+    self->in_position = self->in_buffer;
+    
+    return len;
+}
+
+ssize_t 
+cnrbuf_readline(cnrbuf_t *self, void **p, ssize_t sizehint) {
+    ssize_t rv;
+    
+    if (self->waiting_for_io)
+        return -2;
+    
+    cnrb_dprintf("cnrbuf_readline(): fd=%d sizehint %zd bytes buflimit %zd bytes\n", 
+        self->fd, sizehint, self->in_limit);
+    
+    if (sizehint > self->in_limit)
+        self->in_limit = sizehint;
+
+    /* look if we can return w/o syscalls */
+    if ( self->in_used > 0 ) {
+        rv = sf_extract_line(self, self->in_position, p, sizehint);
+        if (rv > 0)
+            return rv;
+    }
+    
+    do {
+        ssize_t to_read, readen;
+        
+        if ( sizehint )
+            to_read = sizehint - self->in_used;
+        else
+            if ( self->in_used + 2 * CNRBUF_MAGIC < self->in_limit )
+                to_read = 2 * CNRBUF_MAGIC;
+            else 
+                to_read = self->in_limit - self->in_used;
+            
+        if ( sf_reshuffle_buffer(self, to_read) )
+            _fm.abort("cnrbuf_readline(): No memory to reshuffle buffer");
+        
+	readen = recv(self->fd, self->in_position + self->in_used, 
+		      to_read, 0);
+        cnrb_dprintf("cnrbuf_readline: %zd bytes read into %p, reqd len %zd\n", 
+                readen, self->in_position + self->in_used, to_read );
+	if (readen == 0) { 
+	    /* no more data : return whatever there is */
+	    *p = self->in_position;
+	    rv = self->in_used;
+	    self->in_used = 0;
+	    self->in_position = self->in_buffer;
+	    return rv;
+	}
+	if (readen == -1) {
+	    if (errno == EAGAIN) {
+		coev_wait(self->fd, COEV_READ, self->iop_timeout);
+		if (ts_current->status != CSW_EVENT)
+		    return -1;
+		continue;
+	    }
+	    return -1;
+	}
+        /* woo we read something */
+        {
+            char *old_position = self->in_position + self->in_used;
+            self->in_used += readen;
+            cnrb_dump(self);
+	    rv = sf_extract_line(self, old_position, p, sizehint);
+            if ( rv > 0 )
+                return rv;
+        }
+
+    } while(1);
+}
+
+ssize_t
+cnrbuf_write(cnrbuf_t *self, void *data, ssize_t len) {
+    ssize_t written, to_write, wrote;
+
+    written = 0;
+    to_write = len;
+    while (to_write){ 
+	wrote = send(self->fd, (char *)data + written, to_write, MSG_NOSIGNAL);
+	if (wrote == -1) {
+	    if (errno == EAGAIN) {
+		coev_wait(self->fd, COEV_WRITE, self->iop_timeout);
+		if (ts_current->status == CSW_EVENT)
+		    continue;
+	    }
+	    break;
+	}
+	written += wrote;
+	to_write -= wrote;
+    }
+    
+    return written; /* should be len, but may be less. */
+}
+
 void
 coev_getstats(uint64_t *sw, uint64_t *wa, uint64_t *sl, uint64_t *bc) {
     *sw = _fm.c_switches;
@@ -703,9 +1272,8 @@ coev_getstats(uint64_t *sw, uint64_t *wa, uint64_t *sl, uint64_t *bc) {
 }
 
 void
-coev_setdebug(int debug, int dump) {
-    _fm.debug_output = debug;
-    _fm.dump_coevs = dump;
+coev_setdebug(int debug) {
+    _fm.debug = debug;
 }
 
 int 
@@ -741,11 +1309,26 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     ts_scheduler.runq_head = NULL;
     ts_scheduler.runq_tail = NULL;
     
+    ts_cls_last_key = 1L;
+    
     if (_fm.inthdlr) {
         ev_signal_init(&ts_scheduler.intsig, intsig_cb, SIGINT);
         ev_signal_start(ts_scheduler.loop, &ts_scheduler.intsig);
         ev_unref(ts_scheduler.loop);
     }
     
+    ts_rootlockbunch = NULL;
+    colock_bunch_init(&ts_rootlockbunch);
+    
     coev_init_root(root);
+}
+
+void
+coev_libfini(void) {
+    /* should do something good here. */
+    if (ts_current != ts_root)
+	_fm.abort("coev_libfini() must be called only in root coro.");
+	
+    colock_bunch_fini(ts_rootlockbunch);
+    cls_drop_all();
 }

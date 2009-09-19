@@ -33,48 +33,92 @@ extern "C" {
 #define CSTATE_DEAD          6 /* dead */
 
 /* coev_t::status */
-#define CSW_NONE               0 /* there was no switch */
-#define CSW_VOLUNTARY          1 /* explicit switch, not from the scheduler */
-#define CSW_EVENT              2 /* io-event fired */
-#define CSW_WAKEUP             3 /* sleep elapsed */
-#define CSW_TIMEOUT            4 /* io-event timed out */
-#define CSW_SIGCHLD            5 /* child died */
-#define CSW_YIELD              6 /* switck back after explicit yield (aka scheduled) */
-/* below are immediate (no actual switch) error return values */
-#define CSW_NOWHERE_TO_SWITCH  7 /* wait or sleep w/o scheduler and no one to ask for one */
-#define CSW_SCHEDULER_NEEDED   8 /* wait or sleep w/o scheduler: please run one (to a parent) */
-#define CSW_WAIT_IN_SCHEDULER  9 /* wait or sleep in the scheduler */
-#define CSW_SWITCH_TO_SELF    10 /* switch to self attempted. */
+#define CSW_NONE             0 /* there was no switch */
+#define CSW_VOLUNTARY        1 /* explicit switch, not from the scheduler */
+#define CSW_EVENT            2 /* io-event fired */
+#define CSW_WAKEUP           3 /* sleep elapsed */
+#define CSW_TIMEOUT          4 /* io-event timed out */
+#define CSW_SIGCHLD          5 /* child died */
+#define CSW_YIELD            6 /* switck back after explicit yield (aka scheduled) */
 
+/* below are immediate (no actual switch) error return values */
+#define CSW_LESS_THAN_AN_ERROR   9 /* used to distinguish errors, never actually returned. */
+#define CSW_NOWHERE_TO_SWITCH   10 /* wait, sleep or stall w/o scheduler and no one to ask for one */
+#define CSW_SCHEDULER_NEEDED    11 /* wait, sleep or stall w/o scheduler: please run one (to a parent) */
+#define CSW_WAIT_IN_SCHEDULER   12 /* wait, sleep or stall in the scheduler */
+#define CSW_SWITCH_TO_SELF      13 /* switch to self attempted. */
+
+#define CSW_ERROR(c) (  (c)->status  > CSW_LESS_THAN_AN_ERROR )
+
+/* This is preallocated size for (T)CLS storage.
+   that much pointers can be stored per coroutine
+   without separate memory allocation. 
+   Takes up 512 bytes on x86, 1k on x86-64. */
+#define CLS_KEYCHAIN_SIZE 63
+
+/* This is preallocated size for lock storage:
+   number of locks. */
+#ifndef COLOCK_PREALLOCATE
+#define COLOCK_PREALLOCATE 64
+#endif
+
+struct _coev_lock;
+typedef struct _coev_lock colock_t;
 
 struct _coev;
 typedef struct _coev coev_t;
 typedef void (*coev_runner_t)(coev_t *);
 
+struct _key_tuple;
+typedef struct _key_tuple cokey_t;
+
+struct _key_chain;
+typedef struct _key_chain cokeychain_t;
+
+struct _coev_lock {
+    colock_t *next;
+    coev_t *owner;
+};
+
+struct _key_tuple {
+    long key;
+    void *value;
+};
+
+struct _key_chain {
+    cokeychain_t *next;   
+    cokey_t keys[CLS_KEYCHAIN_SIZE]; 
+};
+
 struct _coev {
     ucontext_t ctx;     /* the context */
     unsigned int id;    /* serial, to build debug representations / show tree position */
+    int flags;          /* */
     
     coev_t *parent;     /* report death here */
-    coev_t *origin;     /* switched from here last time */
 
+    coev_t *origin;     /* switched from here last time */
     int state;          /* CSTATE_* -- state of this coroutine */
     int status;         /* CSW_*  -- status of last switch into this coroutine */
+    char *treepos;      /* position in the tree */
     
     coev_runner_t run;  /* entry point into the coroutine, NULL if the coro has already started. */
     
-    struct ev_io watcher; /* IO watcher */
-    struct ev_timer io_timer; /* IO timeout timer. */
+    struct ev_io watcher;        /* IO watcher */
+    struct ev_timer io_timer;    /* IO timeout timer. */
     struct ev_timer sleep_timer; /* sleep timer */
     
     coev_t *next;         /* runqueue list pointer */
     int ran_out_of_order; /* already ran flag */
-    char *treepos;      /* position in the tree */
+    
+    cokeychain_t kc;      /* CLS keychain */
+    cokeychain_t *kc_tail; /* CLS meta-keychain tail (if it was ever extended) */
     
 #ifdef THREADING_MADNESS
     pthread_t thread;
 #endif    
 };
+
 
 
 /*** METHOD OF OPERATION
@@ -153,10 +197,8 @@ typedef struct _coev_framework_methods {
     /* debug output collector */
     int (*dprintf)(const char *format, ...);
     
-    /* 1=do the debug output */
-    int debug_output;
-    /* 1=dump coev structures when appropriate */
-    int dump_coevs;
+    /* debug output bitmask*/
+    int debug;
     
     /* statistics: */
     volatile uint64_t c_switches;
@@ -167,10 +209,11 @@ typedef struct _coev_framework_methods {
 } coev_frameth_t;
 
 void coev_libinit(const coev_frameth_t *fm, coev_t *root);
+void coev_libfini(void);
 
 void coev_init(coev_t *child, coev_runner_t runner, size_t stacksize);
-void coev_free(coev_t *corpse);
-void coev_switch(coev_t *target);
+void coev_fini(coev_t *corpse);
+
 coev_t *coev_current(void);
 /* returns 0 on success or -1 if a cycle would result */
 int coev_setparent(coev_t *target, coev_t *newparent);
@@ -181,6 +224,10 @@ const char *coev_treepos(coev_t *coio);
 const char *coev_state(coev_t *);
 const char *coev_status(coev_t *);
 
+/* explicitly switch to the target */
+void coev_switch(coev_t *target);
+
+/* coev_wait()'s revents bits*/
 #define COEV_READ       EV_READ
 #define COEV_WRITE      EV_WRITE
 
@@ -192,14 +239,19 @@ void coev_wait(int fd, int revents, ev_tstamp timeout);
 /* wrapper around the above. */
 void coev_sleep(ev_tstamp timeout);
 
-
+/* coev_schedule() return values */
 #define CSCHED_NOERROR          0  /* no error */
-#define CSCHED_DEADMEAT         1  /* attempt to schedule dead coroutin */
+#define CSCHED_DEADMEAT         1  /* attempt to schedule dead coroutine */
 #define CSCHED_ALREADY          2  /* attempt to schedule already scheduled coroutine */
 #define CSCHED_NOSCHEDULER      3  /* attempt to yield, but no scheduler to switch to */
 
 /* schedule a switch to the waiter */
 int coev_schedule(coev_t *waiter);
+
+/* switch to scheduler until something happens.
+   same as coev_schedule(coev_current), but
+   abort on error. */
+void coev_stall(void);
 
 /* must be called for IO scheduling to begin. */
 void coev_loop(void);
@@ -208,14 +260,99 @@ void coev_loop(void);
 does not perform a switch to scheduler. */
 void coev_unloop(void);
 
-void coev_getstats(uint64_t *switches, uint64_t *waits, uint64_t *sleeps, uint64_t *bytes_copied);
-void coev_setdebug(int de, int du);
 
-#define COEV_STARTED(op)    ((op)->stack_stop != NULL)
-#define COEV_ACTIVE(op)     ((op)->stack_start != NULL)
-#define COEV_DEAD(op)       (((op)->stack_stop != NULL) && ((op)->stack_start == NULL))
+/*  Locking implemented only to satisfy Python's current 
+    threading model. Design criticism is devnulled. 
 
-#define COEV_GET_PARENT(op) ((op)->parent)
+    As all execution is serial, there should not be any blocking
+    on a lock - allowing a switch inside acquire/release pair is
+    as bad a programmer error as it could get. switch() and friends
+    themselves are guarded against GIL deadlocks by releasing it before,
+    and reacquiring immediately after any context swap - in the threadingmodule.c
+    replacement.
+    
+    acquire() does this: while(lock is held) { spam_dire_insults(); coev_stall(); }
+    Witness the awesomeness of a possible deadlock.
+
+*/
+colock_t *colock_allocate(void);
+void  colock_free(colock_t *p);
+void  colock_acquire(colock_t *p);
+void  colock_release(colock_t *p); 
+
+
+/*  Coroutine-local storage is designed to satisfy perverse semantics 
+    that Python/thread.c expects. Go figure.
+    
+    key value of 0 means this slot is not used. 0 is never returned 
+    by cls_allocate().
+*/
+#define CLS_FREE_SLOT 0L
+long  cls_new(void);   
+void *cls_get(long k);  /* NULL if not found in the current ctx */
+int   cls_set(long k, void *v); /* -1 if value already set. 0 otherwise */
+void  cls_del(long k);  
+void  cls_drop_all(void); /* drops all cls keys */
+
+
+/* Buffered read/write on network sockets
+   
+   Originally written as a Python file-like object.
+ */
+
+struct _coev_nrbuf {
+    int fd;
+    char *in_buffer, *in_position;
+    size_t in_allocated, in_used;
+    size_t in_limit;
+    double iop_timeout;
+    int waiting_for_io;
+};
+
+typedef struct _coev_nrbuf cnrbuf_t;
+
+/* prealloc - how much to allocate right away
+   rlim - soft limit on read buffer. Is implicitly raised if subsequent
+          read() or readline() request more data than that. */
+void cnrbuf_init(cnrbuf_t *buf, int fd, double timeout, size_t prealloc, size_t rlim);
+void cnrbuf_fini(cnrbuf_t *buf);
+
+/* reads up enough to get you hint bytes in the internal buffer.
+   (may actually recv() more than that) If hint == -1, reads until EOF.
+   return value: 
+       -1 - see errno, *p not changed
+        0 - immediate EOF, *p not changed.
+       >0 - *p points into the buffer, where you can get this much bytes.
+       call to cnrbuf_done(rv) is mandatory after you're finished with data.
+*/
+ssize_t cnrbuf_read(cnrbuf_t *buf, void **p, ssize_t hint);
+
+/* same as the above, but reads up to newline, or up to hint, 
+   or if hint is -1, up to soflim and returns that.  */
+ssize_t cnrbuf_readline(cnrbuf_t *buf, void **p, ssize_t hint);
+
+/* call this to update internal pointer after you're done with data. */
+void cnrbuf_done(cnrbuf_t *buf, ssize_t eaten);
+
+/* attempt to send given data. 
+   returns 0 on success, or bytecount of data not send if some
+   failure occured. Consult errno. */
+ssize_t cnrbuf_write(cnrbuf_t *buf, void *data, ssize_t dlen);
+
+/* libwide stuff */
+void coev_getstats(uint64_t *switches, uint64_t *waits, 
+    uint64_t *sleeps, uint64_t *bytes_copied);
+
+
+#define CDF_COEV         0x01   /* switches */
+#define CDF_COEV_DUMP    0x02   /* coev state dumps on switches */
+#define CDF_RUNQ_DUMP    0x04   /* runq dumps in scheduler */
+#define CDF_NBUF         0x10   /* reads/writes */
+#define CDF_NBUF_DUMP    0x20   /* buffer metadata before/after */
+
+void coev_setdebug(int flagsmask);
+
+
 
 #ifdef __cplusplus
 }
