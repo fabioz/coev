@@ -7,12 +7,6 @@
 #include "ucoev.h"
 
 
-/* mod.local: a type. 
-
-   constructor returns a plain PyObject bound to current coroutine.
-
-*/
-
 struct _coroutine;
 typedef struct _coroutine PyCoroutine;
 
@@ -20,9 +14,7 @@ struct _coroutine {
     PyObject_HEAD
     coev_t coev;
     PyObject *run;   /* callable. we own this until it returns. */
-    PyObject *local; /* dict for coro.local() objects' data. */
     PyObject *args;  /* this is both switch() parameter tuple and its return value. */
-    int switch_veto; /* flag to deny switches in coro.local-derived classes' constructors. */
 };
 
 #define TLS_ATTR  __thread
@@ -114,13 +106,6 @@ static struct _exc_def {
         "coev.Exit\n\
 This special exception does not propagate to the parent coroutine; it\n\
 can be used to kill a single coroutine.\n"
-    },
-    {
-        &PyExc_CoroSwitchDenied, &PyExc_CoroError,
-        "coev.SwitchDenied", "SwitchDenied",
-        "Switch (wait, sleep) is denied. No switches\n"
-        "are allowed in constructors of classes\n"
-	"derived from coev.local\n"
     },
     {
         &PyExc_CoroSocketError, &PyExc_CoroError,
@@ -308,8 +293,6 @@ coro_traverse(PyObject *po, visitproc visit, void *arg) {
     
     /* Py_VISIT(self->parent); circular references through parent 
       are not possible as we enforce loop absence in the coroutine tree */
-    if (self->local)
-        Py_VISIT(self->local);
     if (self->run)
         Py_VISIT(self->run);
     return 0;
@@ -322,7 +305,6 @@ coro_clear(PyObject *po) {
     
     coro_dprintf("coro_clear() %p run %p\n", self, self->run);
     
-    Py_CLEAR(self->local);
     Py_CLEAR(self->run);
     self = PARENTCORO(self);
     Py_CLEAR(self);
@@ -707,264 +689,6 @@ PyTypeObject PyCoroutine_Type = {
     0,          			/* tp_free */
     coro_is_gc,	                        /* tp_is_gc */
 };
-
-
-/** coroutine-local data interface: threading.local analog:
-
-coroutine.local type. 
-
-its instance's __dict__ is bound to the coroutine object that created it. 
-
-PyCoroutine::local: { id(coroutine.local instance): its __dict__ }
-
-coroutine inheritance:
-  When an existing coroutine.local object is accessed in a coroutine,
-  the tree is traversed to root to find the coroutine whose local member contains 
-  the __dict__ for the object. Iff it is not found, new __dict__ is attached
-  to the current coroutine.
-  
-  When a new coroutine.local object is constructed, it is attached to the current
-  coroutine.
-   
-  Constructors of coroutine.local subclasses are prohibited from performing switches.
-  Performing a switch() causes Py_FatalError(). 
-
-*/
-
-typedef struct {
-    PyObject_HEAD
-    PyObject *key;
-    PyObject *args;
-    PyObject *kw;
-    PyObject *dict;
-} CoroLocalData;
-
-PyDoc_STRVAR(corolocal_doc,
-"local() -> None\n\n\
-Coroutine-local data.\n\n\
-Closely modelled on (and implementation morphed from) standard library's\n\
-threading._local class.\n\n\
-Notice: while subclassing is allowed, no coroutine switches are allowed\n\
-in subclasses' constructor. Attempt to switch will result in SwitchDenied\n\
-exception.");
-
-static PyObject *
-corolocal_new(PyTypeObject *type, PyObject *args, PyObject *kw) {
-    CoroLocalData *self;
-
-    if (type->tp_init == PyBaseObject_Type.tp_init
-        && ((args && PyObject_IsTrue(args))
-        || (kw && PyObject_IsTrue(kw)))) {
-        PyErr_SetString(PyExc_TypeError, 
-                        "Initialization arguments are not supported");
-        return NULL;
-    }
-
-    self = (CoroLocalData *)type->tp_alloc(type, 0);
-    if (self == NULL)
-        return NULL;
-    
-    Py_XINCREF(args);
-    self->args = args;
-    Py_XINCREF(kw);
-    self->kw = kw;
-    self->dict = NULL;	/* making sure */
-    self->key = PyString_FromFormat("coroutine.local.%p", self);
-    if (self->key == NULL) 
-        goto err;
-
-    self->dict = PyDict_New();
-    if (self->dict == NULL)
-        goto err;
-
-    if (CURCORO->local == NULL) { /* lazy allocation */
-        CURCORO->local = PyDict_New();
-        if (CURCORO->local == NULL)
-            goto err;
-    }
-
-    if (PyDict_SetItem(CURCORO->local, self->key, self->dict) < 0)
-        goto err;
-
-    return (PyObject *)self;
-
-err:
-    Py_DECREF(self);
-    return NULL;
-}
-
-static int
-corolocal_traverse(CoroLocalData *self, visitproc visit, void *arg) {
-    Py_VISIT(self->args);
-    Py_VISIT(self->kw);
-    Py_VISIT(self->dict);
-    return 0;
-}
-
-static int 
-corolocal_clear(CoroLocalData *self) {
-    Py_CLEAR(self->key);
-    Py_CLEAR(self->args);
-    Py_CLEAR(self->kw);
-    Py_CLEAR(self->dict);
-    return 0;
-}
-
-static void
-corolocal_dealloc(CoroLocalData *self) {
-    /* WTF do here?? */
-    /* threading.local code visits every threadlocal dict and 
-       deletes the reference to the self.
-
-       As the primary mode of operation for coroutines is spawn often, die often,
-       we leave our data to be taken care of by coroutine destructors. For now.
-    */
-
-    corolocal_clear(self);
-    Py_TYPE(self)->tp_free((PyObject*)self);
-}
-
-static PyObject *
-find_cldict(CoroLocalData *self) {
-    PyObject *cldict;
-    
-    if (CURCORO->local == NULL) {
-        /* lazily initialize coroutine's cldict */
-        coro_dprintf("find_cldict(): CLD[%p] attaches new local dict to [%s]", self, CURCORO->coev.treepos);
-        CURCORO->local = PyDict_New(); 
-        cldict = NULL;
-    } else {
-        cldict = PyDict_GetItem(CURCORO->local, self->key);
-    }
-
-    if (cldict == NULL) {
-        cldict = PyDict_New(); /* we own ldict */
-
-        if (cldict == NULL) {
-            return NULL;
-        } else {
-            int i = PyDict_SetItem(CURCORO->local, self->key, cldict);
-            Py_DECREF(cldict); /* now ldict is borrowed */
-            if (i < 0) 
-                return NULL;
-        }
-
-        Py_CLEAR(self->dict);
-        Py_INCREF(cldict);
-        self->dict = cldict; /* still borrowed */
-
-        CURCORO->switch_veto = 1;
-        if (Py_TYPE(self)->tp_init != PyBaseObject_Type.tp_init &&
-            Py_TYPE(self)->tp_init((PyObject*)self, self->args, self->kw) < 0) {
-            /* we need to get rid of cldict from coroutine so
-               we create a new one the next time we do an attr
-               access */ /* WTF is this ?? */
-                PyDict_DelItem(CURCORO->local, self->key);
-                cldict = NULL;
-        }
-    }
-    CURCORO->switch_veto = 0;
-    return cldict;
-}
-    
-
-static int
-corolocal_setattro(CoroLocalData *self, PyObject *name, PyObject *v) {
-    PyObject *cldict;
-
-    cldict = find_cldict(self);
-    if (cldict == NULL) 
-        return -1;
-
-    return PyObject_GenericSetAttr((PyObject *)self, name, v);
-}
-
-static PyObject *
-corolocal_getdict(CoroLocalData *self, void *closure) {
-    if (self->dict == NULL) {
-        PyErr_SetString(PyExc_AttributeError, "__dict__");
-        return NULL;
-    }
-
-    Py_INCREF(self->dict);
-    return self->dict;
-}
-
-static PyGetSetDef corolocal_getset[] = {
-    {   "__dict__", 
-        (getter) corolocal_getdict, 
-        (setter) NULL,
-        "local-data dictionary", 
-        NULL 
-    },
-    { 0 }  
-};
-
-static PyObject *corolocal_getattro(CoroLocalData *, PyObject *);
-
-static PyTypeObject CoroLocalData_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    /* tp_name           */ "coev.local",
-    /* tp_basicsize      */ sizeof(CoroLocalData),
-    /* tp_itemsize       */ 0,
-    /* tp_dealloc        */ (destructor)corolocal_dealloc,
-    /* tp_print          */ 0,
-    /* tp_getattr        */ 0,
-    /* tp_setattr        */ 0,
-    /* tp_compare        */ 0,
-    /* tp_repr           */ 0,
-    /* tp_as_number      */ 0,
-    /* tp_as_sequence    */ 0,
-    /* tp_as_mapping     */ 0,
-    /* tp_hash           */ 0,
-    /* tp_call           */ 0,
-    /* tp_str            */ 0,
-    /* tp_getattro       */ (getattrofunc)corolocal_getattro,
-    /* tp_setattro       */ (setattrofunc)corolocal_setattro,
-    /* tp_as_buffer      */ 0,
-    /* tp_flags          */ Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
-    /* tp_doc            */ corolocal_doc,
-    /* tp_traverse       */ (traverseproc)corolocal_traverse,
-    /* tp_clear          */ (inquiry)corolocal_clear,
-    /* tp_richcompare    */ 0,
-    /* tp_weaklistoffset */ 0,
-    /* tp_iter           */ 0,
-    /* tp_iternext       */ 0,
-    /* tp_methods        */ 0,
-    /* tp_members        */ 0,
-    /* tp_getset         */ corolocal_getset,
-    /* tp_base           */ 0,
-    /* tp_dict           */ 0,
-    /* tp_descr_get      */ 0,
-    /* tp_descr_set      */ 0,
-    /* tp_dictoffset     */ offsetof(CoroLocalData, dict),
-    /* tp_init           */ 0,
-    /* tp_alloc          */ 0,
-    /* tp_new            */ corolocal_new
-};
-
-static PyObject *
-corolocal_getattro(CoroLocalData *self, PyObject *name)
-{
-    PyObject *cldict, *value;
-
-    cldict = find_cldict(self);
-    if (cldict == NULL) 
-        return NULL;
-
-    if (Py_TYPE(self) != &CoroLocalData_Type)
-        /* use generic lookup for subtypes */
-        return PyObject_GenericGetAttr((PyObject *)self, name);
-
-    /* Optimization: just look in dict ourselves */
-    value = PyDict_GetItem(cldict, name);
-    if (value == NULL) 
-        /* Fall back on generic to get __class__ and __dict__ */
-        return PyObject_GenericGetAttr((PyObject *)self, name);
-
-    Py_INCREF(value);
-    return value;
-}
 
 /** coev.socketfile - file-like interface to a network socket */
 
@@ -1676,9 +1400,6 @@ initcoev(void) {
     if (PyType_Ready(&PyCoroutine_Type) < 0)
         return;
 
-    if (PyType_Ready(&CoroLocalData_Type) < 0)
-        return;
-
     if (PyType_Ready(&CoroSocketFile_Type) < 0)
         return;
 
@@ -1719,9 +1440,6 @@ initcoev(void) {
     PyCoroutine_TypePtr = &PyCoroutine_Type;
     Py_INCREF(&PyCoroutine_Type);
     PyModule_AddObject(m, "coroutine", (PyObject*) &PyCoroutine_Type);
-    
-    Py_INCREF(&CoroLocalData_Type);
-    PyModule_AddObject(m, "local", (PyObject*) &CoroLocalData_Type);
     
     Py_INCREF(&CoroSocketFile_Type);
     PyModule_AddObject(m, "socketfile", (PyObject*) &CoroSocketFile_Type);
