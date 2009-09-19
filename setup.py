@@ -43,7 +43,9 @@ daext = Extension(
     name='coev', 
     sources=['modcoev.c'], 
     undef_macros=['NDEBUG'],
-    libraries=['coev'])
+    libraries=['ucoev'],
+    include_dirs = ['/home/lxnt/projects/ucoev/libcoev-ucontext'],
+    library_dirs = ['/home/lxnt/projects/ucoev/libcoev-ucontext'])
 
 setup(
     name="coev",
