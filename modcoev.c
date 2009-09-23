@@ -1,56 +1,21 @@
 #define PY_SSIZE_T_CLEAN
 #include "Python.h"
-#include "structmember.h"
 
 #include <sys/types.h>
+#include <time.h>
 
 #include "ucoev.h"
 
+/** version 0.5 - no explicit coroutine type.
+    switch, wait and friends operate on thread-ids.
+    
+    scheduler control functions,
+    python bindings for libucoev's cnrbuf_t 
+**/
 
-struct _coroutine;
-typedef struct _coroutine PyCoroutine;
+static int debug_flag;
 
-struct _coroutine {
-    PyObject_HEAD
-    coev_t coev;
-    PyObject *run;   /* callable. we own this until it returns. */
-    PyObject *args;  /* this is both switch() parameter tuple and its return value. */
-};
-
-#define TLS_ATTR  __thread
-
-static TLS_ATTR
-struct _coroutine_stats {
-    uint64_t created;
-    uint64_t destroyed;
-} module_stats;
-
-static TLS_ATTR PyCoroutine *coro_main;
-static TLS_ATTR int debug_flag;
-
-#define COEV2CORO(subject) \
-    ( \
-	    subject != NULL \
-	? \
-	    (PyCoroutine *) ( ((char *)(subject)) - offsetof(PyCoroutine, coev) ) \
-	: \
-	    NULL \
-    )
-
-#define CURCORO COEV2CORO(coev_current())
-
-#define PARENTCORO_NOCHECK(subject) \
-    ( (PyCoroutine *) ( ((char *)(subject->coev.parent)) - offsetof(PyCoroutine, coev) ) )
-
-#define PARENTCORO(subject) \
-    ( \
-	    (( subject != NULL) && (subject->coev.parent != NULL ))  \
-	? \
-	    PARENTCORO_NOCHECK(subject) \
-	: \
-	    (PyCoroutine *) NULL \
-    )
-
+static time_t start_time;
 
 /* require Python >= 2.5 */
 #if (PY_VERSION_HEX < 0x02050000)
@@ -65,12 +30,31 @@ static TLS_ATTR int debug_flag;
 #define PyVarObject_HEAD_INIT(type, size) PyObject_HEAD_INIT(type) size,
 #endif
 
+
+static struct _const_def { 
+    const char *name;
+    int value;
+} _const_tab[] = {
+    { "READ", COEV_READ },
+    { "WRITE", COEV_WRITE },
+    { "CDF_COEV", CDF_COEV },
+    { "CDF_COEV_DUMP", CDF_COEV_DUMP},
+    { "CDF_RUNQ_DUMP", CDF_RUNQ_DUMP},
+    { "CDF_NBUF", CDF_NBUF},
+    { "CDF_NBUF_DUMP", CDF_NBUF_DUMP},
+    { "CDF_COLOCK", CDF_COLOCK},
+    { "CDF_COLOCK_DUMP", CDF_COLOCK_DUMP },
+    { "CDF_STACK", CDF_STACK},
+    { "CDF_STACK_DUMP", CDF_STACK_DUMP },
+    { 0 }
+};
+
+
 static PyObject* PyExc_CoroError;
 static PyObject* PyExc_CoroExit;
 static PyObject* PyExc_CoroTimeout;
 static PyObject* PyExc_CoroWaitAbort;
 static PyObject* PyExc_CoroNoSchedInRoot;
-static PyObject* PyExc_CoroSwitchDenied;
 static PyObject* PyExc_CoroSocketError;
 
 static struct _exc_def {
@@ -115,14 +99,12 @@ can be used to kill a single coroutine.\n"
     { 0 }
 };
 
-#define CR_DCHAN        0x01
-#define SF_DCHAN        0x02
-
 static int
 _coro_dprintf(const char *fmt, ...) {
     va_list ap;
     int rv;
 
+    fprintf(stderr, "[%d] ", (int) (time(NULL) - start_time));
     va_start(ap, fmt);
     rv = vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -130,224 +112,10 @@ _coro_dprintf(const char *fmt, ...) {
     return rv;
 }
 
-#define coro_dprintf(fmt, args...) do { if (debug_flag & CR_DCHAN) \
+#define coro_dprintf(fmt, args...) do { if (debug_flag) \
     _coro_dprintf(fmt, ## args); } while(0)
-#define sofi_dprintf(fmt, args...) do { if (debug_flag & SF_DCHAN) \
-    _coro_dprintf("sf:" fmt, ## args); } while(0)
 
-static void 
-coro_runner(coev_t *coev) {
-    PyCoroutine *self = COEV2CORO(coev);
-    PyObject *result;
-    PyObject *t, *v, *tb, *r;
-
-    Py_INCREF(self); /* we're referenced by running? */
-    
-    coro_dprintf("coro_runner() [%s]: param %p; running.\n", 
-        self->coev.treepos, self->args);
-    
-    result = PyEval_CallObject(self->run, self->args);
-    
-    coro_dprintf("coro_runner() [%s]: result %p.\n", 
-        self->coev.treepos, result);
-    
-    Py_CLEAR(self->args); /* this may well be some other object 
-                       than was originally passed, but we don't care. */
-    
-    coro_dprintf("coro_runner() [%s]: args released.\n", 
-        self->coev.treepos);
-    
-    self->args = result; 
-
-    PyErr_Fetch(&t, &v, &tb);
-    
-    if (t != NULL) {
-	if (result != NULL)
-	    Py_FatalError("result != NULL, exception is raised. This cannot be.");
-	
-        if (PyErr_GivenExceptionMatches(t, PyExc_CoroExit)) {
-            /* we're being killed */
-            coro_dprintf("coro_runner() [%s]: CoroExit raised, returning None.\n", 
-                self->coev.treepos);
-            Py_DECREF(t);
-            Py_XDECREF(v);
-            Py_XDECREF(tb);
-	    Py_INCREF(Py_None);
-	    self->args = Py_None;
-        }
-        if (debug_flag) {
-            if (v)
-                r = PyObject_Repr(v);
-            else
-                r = PyObject_Repr(t);
-            coro_dprintf("coro_runner() [%s]: returned %p, exception: %s\n", 
-                self->coev.treepos, result,
-                PyString_AsString(r)
-            );
-            Py_DECREF(r);
-        }
-        /* get rid of the traceback so it does not get passed into other coroutines. */
-        Py_CLEAR(tb);
-        PyErr_Restore(t, v, tb);
-        
-    } else 
-        if (debug_flag) {
-            if (result != NULL) {
-                PyObject *r;
-                r = PyObject_Repr(result);
-                coro_dprintf("coro_runner() [%s]: returned %s, no exception.\n", 
-                    self->coev.treepos, PyString_AsString(r));
-                Py_DECREF(r);
-            } else {
-                coro_dprintf("coro_runner() [%s]: NULL return w/o exception.\n", 
-                    self->coev.treepos);
-            }
-        }
-    
-    Py_CLEAR(self->run);
-    /* Py_DECREF(self) is delayed to parent, as we still
-        have a reference in parent->coev.origin when control
-        is passed to parent, and we still need parent->coev.origin->args
-        to hear the last gasps. */
-}
-
-static PyObject * 
-coro_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
-    PyCoroutine *child, *current;
-    
-    child = (PyCoroutine *)type->tp_alloc(type, 0);
-    
-    if (!child)
-        return NULL;
-    
-    current = CURCORO;
-
-    coev_init(&child->coev, &coro_runner, 42*4096);
-    Py_INCREF(current); /* current (child's parent) is referenced by the child. */
-    child->run = Py_None;
-    Py_INCREF(child->run);
-    child->switch_veto = 0;
-    module_stats.created += 1;
-    
-    return (PyObject *) child;
-}
-
-static int coro_setparent(PyCoroutine* self, PyObject* nparent);
-
-static int 
-coro_init(PyObject *po, PyObject *args, PyObject *kwds) {
-    PyCoroutine *self = (PyCoroutine *)po;
-    PyObject *run = Py_None;
-    PyObject *nparent = NULL; /* defaults to current coroutine */
-    
-    static char *kwlist[] = {"run", "parent", 0};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O", kwlist,
-                                     &run, &nparent))
-        return -1;
-
-    Py_CLEAR(self->run);
-    self->run = run;
-    Py_INCREF(run);
-    
-    if (nparent)
-        return coro_setparent(self, nparent);
-
-    return 0;
-}
-
-/** this is called by Python, when refcount 
-    on a coroutine object reaches zero 
-
-    At this stage, coroutine must be dead,
-    that is, its run() function returned.
-
-*/
-static void 
-coro_dealloc(PyObject *po) {
-    PyCoroutine *self = (PyCoroutine *)po;
-    
-    coro_dprintf("coro_dealloc(): deallocation of [%s] ensues\n", 
-        self->coev.treepos);    
-    
-    if (self->coev.state != CSTATE_DEAD)
-        Py_FatalError("deallocation of non-dead coroutine object");
-
-    /* let go of referenced stuff */
-    po->ob_type->tp_clear(po);
-    
-    /* release coev internal resources */
-    coev_free(&self->coev);
-    
-    /* dealloc self */
-    po->ob_type->tp_free(po);
-    
-    module_stats.destroyed += 1;
-}
-
-/* GC support: tp_traverse */
-static int
-coro_traverse(PyObject *po, visitproc visit, void *arg) {
-    PyCoroutine *self = (PyCoroutine *)po;
-    
-    coro_dprintf("coro_traverse in [%s]\n", coev_treepos(&self->coev));
-    
-    /* Py_VISIT(self->parent); circular references through parent 
-      are not possible as we enforce loop absence in the coroutine tree */
-    if (self->run)
-        Py_VISIT(self->run);
-    return 0;
-}
-
-/* GC support: tp_clear */
-static int 
-coro_clear(PyObject *po) {
-    PyCoroutine *self = (PyCoroutine *)po;
-    
-    coro_dprintf("coro_clear() %p run %p\n", self, self->run);
-    
-    Py_CLEAR(self->run);
-    self = PARENTCORO(self);
-    Py_CLEAR(self);
-    return 0;
-}
-
-/* GC support: determine if this obj is collectable */
-static int
-coro_is_gc(PyObject *po) {
-    PyCoroutine *self = (PyCoroutine *)po;
-    if (self == coro_main) {
-        coro_dprintf("coro_is_gc(): coro_main is never garbage [refcount = %d].\n",
-        po->ob_refcnt);
-        return 0;
-    }
-    if (self->coev.state != CSTATE_DEAD) {
-        coro_dprintf("coro_is_gc(): [%s] is active, refcount = %d\n",
-            self->coev.treepos, po->ob_refcnt);
-        return 0;
-    }
-    coro_dprintf("coro_is_gc(): approving GC on [%s]\n", self->coev.treepos);
-    return 1;
-}
-
-static PyObject *
-coro_unwrap_return_value(PyObject *swrv) {
-    if (!swrv)
-        return NULL;
-    
-    if ( PyTuple_Check(swrv) && (PyTuple_GET_SIZE(swrv) == 1)) {
-        /* unwrap 1-tuple */
-        PyObject *tmp;
-        
-        tmp = PyTuple_GET_ITEM(swrv , 0);
-        Py_INCREF(tmp);
-        Py_DECREF(swrv);
-        return tmp;
-    } 
-    
-    return swrv;
-}
-
-PyDoc_STRVAR(coro_switch_doc,
+PyDoc_STRVAR(mod_switch_doc,
 "switch(*args)\n\
 \n\
 Switch execution to this coroutine.\n\
@@ -367,78 +135,76 @@ function will simply return the args using the same rules as\n\
 above.");
 
 static PyObject* 
-coro_switch(PyCoroutine *self, PyObject *args) {
-    PyObject *result;
-    PyCoroutine *dead_meat;
+mod_switch(PyObject *a, PyObject* args) {
+    PyObject *arg = Py_None, *result;
+    long target_id;
+    coev_t *target, *dead_meat, *self;
     
-    if (CURCORO->switch_veto) {
-        PyErr_SetString(PyExc_CoroSwitchDenied, "switch(): prohibited.");
-        return NULL;
-    }
+    if (!PyArg_ParseTuple(args, "l|O", &target_id, &arg))
+	return NULL;
+coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
+    target = (coev_t *) target_id;
     
-    /* release old args, put new ones into place. */
-    Py_CLEAR(self->args);
-    self->args = args;
-    Py_XINCREF(self->args); /* X in case this is an exception injection */
-        
+    /* Release old arg, put new one in place. */
+    /* On initial run it is NULL, and gets clobbered
+       by switch value on next switch to coroutine. */
+    Py_CLEAR(target->A);
+    Py_INCREF(arg);
+    target->A = arg;
+    
     /* switch into this object. */
-    coro_dprintf("coro_switch: current [%s] target [%s] args %p\n", 
-        coev_treepos(&(CURCORO->coev)),
-        coev_treepos(&(self->coev)),
-        self->args);
+    coro_dprintf("coro_switch: current [%s] target [%s] arg %p \n", 
+        coev_treepos(coev_current()),
+        coev_treepos(target), arg);
     
-    coev_switch(&self->coev);
+    Py_BEGIN_ALLOW_THREADS
+    coev_switch(target);
+    Py_END_ALLOW_THREADS
     
-    self = CURCORO;
+    self = coev_current();
     
     coro_dprintf("coro_switch: current [%s] origin [%s] switch() returned\n",
-        coev_treepos(&self->coev), coev_treepos(self->coev.origin) );
+        coev_treepos(self), coev_treepos(self->origin) );
     
     coro_dprintf("coro_switch: current [%s] state=%s status=%s args=%p\n", 
-        coev_treepos(&self->coev), coev_state(&self->coev), 
-        coev_status(&self->coev), self->args);
+        coev_treepos(self), coev_state(self), 
+        coev_status(self), self->A);
         
     coro_dprintf("coro_switch: origin [%s] state=%s\n", 
-        coev_treepos(self->coev.origin), coev_state(self->coev.origin));
+        coev_treepos(self->origin), coev_state(self->origin));
     
-    switch (self->coev.status) {
+    switch (self->status) {
         case CSW_VOLUNTARY:
-            if (self->args != NULL) {
+            if (self->A != NULL) {
                 /* regular switch */
-                result = coro_unwrap_return_value(self->args);
-                self->args = NULL; /* steal reference */
+                result = self->A;
+                self->A = NULL; /* steal reference */
                 return result;
             } else {
                 /* exception injection */
-                if (!PyErr_Occurred()) 
+                if (!self->X) 
                     Py_FatalError("Exception injection, but no exception set.");
+                PyErr_SetObject(self->X, self->Y);
+                self->X = self->Y = NULL; 
                 return NULL;
             }
         case CSW_SIGCHLD:
-            Py_CLEAR(self->args);
-            dead_meat = COEV2CORO(self->coev.origin);
+            /*  */
+            dead_meat = self->origin;
+            if (dead_meat->state != CSTATE_DEAD)
+                Py_FatalError("CSW_SIGCHLD, but dead_meat->state != CSTATE_DEAD");
+            Py_CLEAR(self->A);
+            Py_CLEAR(dead_meat->A);
+            coev_fini(dead_meat);
+            free(dead_meat);
+            Py_RETURN_NONE;
             
-            if (dead_meat->coev.state != CSTATE_DEAD)
-                Py_FatalError("CSW_SIGCHLD, but dead_meat->coev.state != CSTATE_DEAD");
-            if (dead_meat->args) {
-                /* regular return */
-                result = coro_unwrap_return_value(dead_meat->args);
-                dead_meat->args = NULL; /* steal reference */
-                Py_DECREF(dead_meat);
-                return result;
-            } else {
-                /* exception injection */
-                if (!PyErr_Occurred()) 
-                    Py_FatalError("Child death by exception, but no exception set.");
-                Py_DECREF(dead_meat);
-                return NULL;
-            }
         case CSW_SCHEDULER_NEEDED:
-            Py_CLEAR(self->args);
+            Py_CLEAR(self->A);
             Py_RETURN_NONE;
         
         case CSW_SWITCH_TO_SELF:
-            Py_CLEAR(self->args);
+            Py_CLEAR(self->A);
             PyErr_SetString(PyExc_CoroError,
 		    "switch(): attempt to switch to self");
             return NULL;
@@ -450,65 +216,35 @@ coro_switch(PyCoroutine *self, PyObject *args) {
         case CSW_NOWHERE_TO_SWITCH: /* same. */
         case CSW_WAIT_IN_SCHEDULER: /* should only be seen in wait()/sleep(). */
         default:
-            Py_CLEAR(self->args);
-            PyErr_SetString(PyExc_CoroError,
-		    "switch(): unexpected switchback type");
+            Py_CLEAR(self->A);
+            PyErr_Format(PyExc_CoroError,
+		    "switch(): unexpected switchback type %d", self->status);
             return NULL;
-    }
-    
-    if ( self->args != NULL ) {
-    } else {
-        if (self->coev.status == CSTATE_DEAD) {
-            /* death by exception */
-            coro_dprintf("swreturn [%s]: death by exception\n", coev_treepos(&self->coev));
-            return NULL;
-        }
-
-	/* propagate exception into caller */
-	coro_dprintf("swreturn [%s]: exception injection\n", coev_treepos(&self->coev));
-	return NULL;
     }
 }
-
-PyDoc_STRVAR(throw_doc,
-"throw(typ[,val[,tb]]) -> raise exception in coroutine, return value passed "
+#if 0
+PyDoc_STRVAR(mod_throw_doc,
+"throw(id, typ[,val[,tb]]) -> raise exception in coroutine, return value passed "
 "when switching back");
-/** this basically switches to a coroutine with p=NULL
+/** this basically switches to a coroutine with A=NULL, X=type Y=value
     per Python conventions return of NULL from C extension
-    function means an exception. 
-
-    so we set up an exception and   
-    we call switch with p=NULL
-
-    this NULL winds up in target's coro_switch, which passes it
-    to the interpreter, which raises the exception. */
+    function means an exception. Throwing tracebacks around is not su
+*/
 static PyObject* 
-coro_throw(PyCoroutine* self, PyObject* args) {
-    PyObject *typ = PyExc_CoroExit;
+mod_throw(PyObject *a, PyObject* args) {
+    long target_id;
+    coev_t *target;
+    PyObject *typ = PyExc_SystemExit;
     PyObject *val = NULL;
     PyObject *tb = NULL;
-    
-    if (CURCORO->switch_veto) {
-        PyErr_SetString(PyExc_CoroSwitchDenied, "coro_throw(): switch prohibited.");
-        return NULL;
-    }    
-    
-    if (!PyArg_ParseTuple(args, "|OOO:throw", &typ, &val, &tb))
+       
+    if (!PyArg_ParseTuple(args, "l|OO:throw", &target_id, &typ, &val))
         return NULL;
 
-    /*  First, check the traceback argument, 
-        replacing None with NULL. */
-    if (tb == Py_None)
-        tb = NULL;
-    else if (tb != NULL && !PyTraceBack_Check(tb)) {
-        PyErr_SetString(PyExc_TypeError,
-            "throw() third argument must be a traceback object");
-        return NULL;
-    }
-
+    target = (coev_t *) target_id;
+    
     Py_INCREF(typ);
     Py_XINCREF(val);
-    Py_XINCREF(tb);
 
     if (PyExceptionClass_Check(typ)) {
         PyErr_NormalizeException(&typ, &val, &tb);
@@ -533,173 +269,43 @@ coro_throw(PyCoroutine* self, PyObject* args) {
         goto failed_throw;
     }
 
-    PyErr_Restore(typ, val, tb);
+    target->A = NULL;
+    target->X = typ;
+    target->Y = val;
     
-    return coro_switch(self, NULL);
+    return mod_switch(target, NULL);
 
 failed_throw:
     /* Didn't use our arguments, so restore their original refcounts */
     Py_DECREF(typ);
     Py_XDECREF(val);
-    Py_XDECREF(tb);
     return NULL;
 }
+#endif
 
-static int 
-coro_nonzero(PyCoroutine* self) {
-    return (self->coev.state != CSTATE_DEAD);
-}
-
-static PyObject *
-coro_getdead(PyCoroutine* self, void* c) {
-    PyObject* res;
-    if (self->coev.state == CSTATE_DEAD)
-        res = Py_False;
-    else
-        res = Py_True;
-    Py_INCREF(res);
-    return res;
-}
-
-static PyObject * 
-coro_getparent(PyCoroutine* self, void* c) {
-    PyCoroutine *result;
-    result = PARENTCORO(self);
-    if (result) {
-	Py_INCREF(result);
-	return (PyObject *)result;
-    }
-
-    Py_RETURN_NONE;
-}
+PyDoc_STRVAR(mod_getpos_doc,
+"getpos([id]) -> str \n\
+  returns treepos for given or current coro.");
 
 static PyObject* 
-coro_getpos(PyCoroutine* self, void* c) {
-    return PyString_FromString(coev_treepos(&self->coev));
-}
-
-static PyTypeObject *PyCoroutine_TypePtr;
-static int 
-coro_setparent(PyCoroutine *self, PyObject *candidate) {
-    PyCoroutine *oldparent, *newparent;
-
-    if (self->coev.state == CSTATE_DEAD) {
-        PyErr_SetString(PyExc_ValueError, "subject must be alive");
-        return -1;
-    }    
-    if (candidate == NULL) {
-        PyErr_SetString(PyExc_AttributeError, "can't delete attribute");
-        return -1;
-    }
-    if (!PyObject_TypeCheck(candidate, PyCoroutine_TypePtr)) {
-        PyErr_SetString(PyExc_TypeError, "parent must be a coroutine");
-        return -1;
-    }
-    newparent = (PyCoroutine *)candidate;
-    if (newparent->coev.state == CSTATE_DEAD) {
-        PyErr_SetString(PyExc_ValueError, "parent must be alive");
-        return -1;
-    }
-    oldparent = PARENTCORO(self);
-    if (coev_setparent(&self->coev, &newparent->coev)) {
-	PyErr_SetString(PyExc_ValueError, "cyclic parent chain");
-	return -1;
-    }
+mod_getpos(PyObject *a, PyObject* args) {
+    long target_id = 0;
+    coev_t *target = coev_current();
     
-    Py_INCREF(newparent);
-    Py_DECREF(oldparent);
-    return 0;
+    if (!PyArg_ParseTuple(args, "|l", &target_id))
+	return NULL;
+    if (target_id)
+        target = (coev_t *) target_id;
+    return PyString_FromString(coev_treepos(target));
 }
-
-static PyMethodDef coro_methods[] = {
-    {"throw",  (PyCFunction) coro_throw,  METH_VARARGS, throw_doc},
-    {"switch", (PyCFunction) coro_switch, METH_VARARGS, coro_switch_doc},
-    { 0 }
-};
-
-static PyGetSetDef coro_getsets[] = {
-    {"parent",  (getter) coro_getparent,
-                (setter) coro_setparent },
-    {"dead",    (getter) coro_getdead },
-    {"posn",    (getter) coro_getpos },
-    { 0 }
-};
-
-static PyNumberMethods coro_as_number = {
-    NULL,                       /* nb_add */
-    NULL,                       /* nb_subtract */
-    NULL,                       /* nb_multiply */
-    NULL,                       /* nb_divide */
-    NULL,                       /* nb_remainder */
-    NULL,                       /* nb_divmod */
-    NULL,                       /* nb_power */
-    NULL,                       /* nb_negative */
-    NULL,                       /* nb_positive */
-    NULL,                       /* nb_absolute */
-    (inquiry) coro_nonzero,     /* nb_nonzero */
-};
-
-PyDoc_STRVAR(coroutine_doc,
-"coroutine([run=None, [parent=None]]) -> coroutine object\n\n\
-Create a new coroutine object (without running it). \n\
-run -- the callable to invoke \n\
-parent -- the parent coroutine, defaults to the current coroutine.");
-
-PyTypeObject PyCoroutine_Type = {
-    PyObject_HEAD_INIT(NULL)
-    0,					/* ob_size */
-    "coev.coroutine",		        /* tp_name */
-    sizeof(PyCoroutine),		/* tp_basicsize */
-    0,					/* tp_itemsize */
-    /* methods */
-    coro_dealloc,		        /* tp_dealloc */
-    0,					/* tp_print */
-    0,					/* tp_getattr */
-    0,					/* tp_setattr */
-    0,					/* tp_compare */
-    0,					/* tp_repr */
-    &coro_as_number,			/* tp_as _number*/
-    0,					/* tp_as _sequence*/
-    0,					/* tp_as _mapping*/
-    0, 					/* tp_hash */
-    0,					/* tp_call */
-    0,					/* tp_str */
-    0,					/* tp_getattro */
-    0,					/* tp_setattro */
-    0,					/* tp_as_buffer*/
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,	/* tp_flags */
-    coroutine_doc,                      /* tp_doc */
-    coro_traverse,                      /* tp_traverse */
-    coro_clear,	                        /* tp_clear */
-    0,					/* tp_richcompare */
-    0,	                                /* tp_weaklistoffset */
-    0,					/* tp_iter */
-    0,					/* tp_iternext */
-    coro_methods,			/* tp_methods */
-    0,					/* tp_members */
-    coro_getsets,			/* tp_getset */
-    0,					/* tp_base */
-    0,					/* tp_dict */
-    0,					/* tp_descr_get */
-    0,					/* tp_descr_set */
-    0,					/* tp_dictoffset */
-    coro_init,		                /* tp_init */
-    0,                                  /* tp_alloc */
-    coro_new,				/* tp_new */
-    0,          			/* tp_free */
-    coro_is_gc,	                        /* tp_is_gc */
-};
 
 /** coev.socketfile - file-like interface to a network socket */
 
 typedef struct {
     PyObject_HEAD
-    int fd;
-    char *in_buffer, *in_position;
-    Py_ssize_t in_allocated, in_used;
-    Py_ssize_t in_limit;
-    double iop_timeout;
-    int waiting_for_io;
+    cnrbuf_t dabuf;
+    int busy;
+    int eof;
 } CoroSocketFile;
 
 PyDoc_STRVAR(socketfile_doc,
@@ -717,42 +323,33 @@ static PyObject *
 socketfile_new(PyTypeObject *type, PyObject *args, PyObject *kw) {
     CoroSocketFile *self;
     static char *kwds[] = {  "fd", "timeout", "rlim", NULL };
+    int fd;
+    Py_ssize_t rlim;
+    double iop_timeout;
 
     self = (CoroSocketFile *)type->tp_alloc(type, 0);
     if (self == NULL)
         return NULL;
     
-    self->waiting_for_io = 0;
-    self->in_buffer = NULL;
-    self->in_allocated = 4096;
-    self->in_limit = 0;
-    
-    if (!PyArg_ParseTupleAndKeywords(args, kw, "ndn", kwds,
-	    &self->fd, &self->iop_timeout, &self->in_limit)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "idn", kwds,
+	    &fd, &iop_timeout, &rlim)) {
 	Py_DECREF(self);
 	return NULL;
     }
-    if (self->in_limit == 0) {
+    if (rlim <= 0) {
 	PyErr_SetString(PyExc_ValueError, "Read buffer limit must be positive");
 	Py_DECREF(self);
 	return NULL;
     }
-    self->in_buffer = PyMem_Malloc(self->in_allocated);
     
-    if (!self->in_buffer) {
-	Py_DECREF(self);
-	return PyErr_NoMemory();
-    }
-    self->in_position = self->in_buffer;
-    
+    cnrbuf_init(&self->dabuf, fd, iop_timeout, 4096, rlim);
+    self->busy = 0;
     return (PyObject *)self;
 }
 
 static void
 socketfile_dealloc(CoroSocketFile *self) {
-    if (self->in_buffer)
-	PyMem_Free(self->in_buffer);
-
+    cnrbuf_fini(&self->dabuf);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -760,9 +357,9 @@ static PyObject *
 mod_wait_bottom_half(void);
 
 
+static PyObject *sf_empty_string = NULL;
 
-
-
+#define RETURN_EMPTYSTRING_IF(cond) do { if((cond)) { Py_INCREF(sf_empty_string); return sf_empty_string; } } while (0)
 
 PyDoc_STRVAR(socketfile_read_doc,
 "read([size]) -> bytestr\n\n\
@@ -771,70 +368,31 @@ size -- size to read.\n\
 ");
 static PyObject * 
 socketfile_read(CoroSocketFile *self, PyObject* args) {
-    int sizehint = 0;
-    PyObject *rv;
+    Py_ssize_t rv, sizehint = 0;
+    void *p;
     
-    if (self->waiting_for_io)
+    if (self->busy)
         return PyErr_SetString(PyExc_CoroError, "socketfile is busy"), NULL;
     
-    if (!PyArg_ParseTuple(args, "|i", &sizehint ))
+    if (!PyArg_ParseTuple(args, "|n", &sizehint ))
 	return NULL;
 
-    sofi_dprintf("read(): fd=%d sizehint %zd bytes buflimit %zd bytes\n", 
-        self->fd, sizehint, self->in_limit);
     
-    if (sizehint > self->in_limit)
-        self->in_limit = sizehint;
-
-    do {
-        ssize_t readen, to_read;
-        
-        if (( sizehint > 0) && (self->in_used >= sizehint )) {
-            rv = PyString_FromStringAndSize(self->in_position, sizehint);
-            self->in_used -= sizehint;
-            self->in_position += sizehint;
-            if (self->in_used == 0)
-                self->in_position = self->in_buffer;
-            return rv;
-        }
-        
-        if ( sizehint > 0 )
-            to_read = sizehint - self->in_used;
-        else
-            if ( self->in_used + 2 * INBUF_MAGIC < self->in_limit )
-                to_read = 2 * INBUF_MAGIC;
-            else 
-                to_read = self->in_limit - self->in_used;            
+    RETURN_EMPTYSTRING_IF(self->eof);
     
-        if ( sf_reshuffle_buffer(self, to_read) )
-            return PyErr_NoMemory();
-        	
-	readen = recv(self->fd, self->in_position + self->in_used, to_read, 0);
-        sofi_dprintf("read(): %zd bytes read into %p, reqd len %zd\n", 
-            readen, self->in_position + self->in_used, to_read);
-        
-	if (readen == -1) {
-	    if (errno == EAGAIN) {
-                self->waiting_for_io = 1;
-		coev_wait(self->fd, COEV_READ, self->iop_timeout);
-		rv = mod_wait_bottom_half();
-                self->waiting_for_io = 0;
-		if (!rv)
-		    return rv;
-		Py_DECREF(rv);
-		continue;
-	    }
-	    return PyErr_SetFromErrno(PyExc_CoroSocketError);
-	}
-	if (readen == 0)
-	    sizehint = self->in_used; /* return whatever we managed to read. */
-	else
-	    self->in_used += readen;
-        if ((readen == 0) && (self->in_used == 0)) { /* read nothing. */
-            return PyString_FromStringAndSize(self->in_position, 0);
-        }
-        dump_buffer_meta(self);
-    } while (1);
+    self->busy = 1;
+    Py_BEGIN_ALLOW_THREADS
+    rv = cnrbuf_read(&self->dabuf, &p, sizehint);
+    Py_END_ALLOW_THREADS    
+    self->busy = 0;
+    
+    if (rv == -1)
+        return mod_wait_bottom_half();
+    
+    if (rv == 0)
+        RETURN_EMPTYSTRING_IF((self->eof = 1));
+    
+    return PyString_FromStringAndSize(p, rv);
 }
 
 
@@ -845,76 +403,31 @@ When size is not given, initialization-supplied limit is used.\n\
 ");
 static PyObject* 
 socketfile_readline(CoroSocketFile *self, PyObject* args) {
-    int sizehint = 0;
-    PyObject *rv;
+    Py_ssize_t rv, sizehint = 0;
+    void *p;
     
-    if (self->waiting_for_io)
+    if (self->busy)
         return PyErr_SetString(PyExc_CoroError, "socketfile is busy"), NULL;
     
-    if (!PyArg_ParseTuple(args, "|i", &sizehint ))
+    if (!PyArg_ParseTuple(args, "|n", &sizehint ))
 	return NULL;
 
-    sofi_dprintf("readline(): fd=%d sizehint %zd bytes buflimit %zd bytes\n", 
-        self->fd, sizehint, self->in_limit);
+    RETURN_EMPTYSTRING_IF(self->eof);
     
-    if (sizehint > self->in_limit)
-        self->in_limit = sizehint;
-
-    /* look if we can return w/o syscalls */
-    if ( self->in_used > 0 ) {
-        rv = sf_extract_line(self, self->in_position, sizehint);
-        if (rv)
-            return rv;
-    }
     
-    do {
-        ssize_t to_read, readen;
-        
-        if ( sizehint )
-            to_read = sizehint - self->in_used;
-        else
-            if ( self->in_used + 2 * INBUF_MAGIC < self->in_limit )
-                to_read = 2 * INBUF_MAGIC;
-            else 
-                to_read = self->in_limit - self->in_used;
-            
-        if ( sf_reshuffle_buffer(self, to_read) )
-            return PyErr_NoMemory();
-        
-	readen = recv(self->fd, self->in_position + self->in_used, 
-		      to_read, 0);
-        sofi_dprintf("readline: %zd bytes read into %p, reqd len %zd\n", 
-                readen, self->in_position + self->in_used, to_read );
-	if (readen == 0) { 
-	    /* no more data : return whatever there is */
-	    rv = PyString_FromStringAndSize(self->in_position, self->in_used);
-	    self->in_used = 0;
-	    self->in_position = self->in_buffer;
-	    return rv;
-	}
-	if (readen == -1) {
-	    if (errno == EAGAIN) {
-                self->waiting_for_io = 1;
-		coev_wait(self->fd, COEV_READ, self->iop_timeout);
-		rv = mod_wait_bottom_half();
-                self->waiting_for_io = 0;
-		if (!rv)
-		    return rv;
-		Py_DECREF(rv);
-		continue;
-	    }
-	    return PyErr_SetFromErrno(PyExc_CoroSocketError);
-	}
-        /* woo we read something */
-        {
-            char *old_position = self->in_position + self->in_used;
-            self->in_used += readen;
-            dump_buffer_meta(self);
-            if ( (rv = sf_extract_line(self, old_position, sizehint)) )
-                return rv;
-        }
-
-    } while(1);
+    self->busy = 1;
+    Py_BEGIN_ALLOW_THREADS
+    rv = cnrbuf_readline(&self->dabuf, &p, sizehint);
+    Py_END_ALLOW_THREADS
+    self->busy = 0;
+    
+    if (rv == -1) 
+        return mod_wait_bottom_half();
+    
+    if (rv == 0)
+        RETURN_EMPTYSTRING_IF((self->eof = 1));
+    
+    return PyString_FromStringAndSize(p, rv);
 }
 
 PyDoc_STRVAR(socketfile_write_doc,
@@ -923,33 +436,25 @@ Write the string to the fd. EPIPE results in an exception.\n\
 ");
 static PyObject * 
 socketfile_write(CoroSocketFile *self, PyObject* args) {
-    PyObject *rv;
     const char *str;
-    Py_ssize_t len, wrote, written, to_write;
+    Py_ssize_t rv, len;
+
+    if (self->busy)
+        return PyErr_SetString(PyExc_CoroError, "socketfile is busy"), NULL;
     
     if (!PyArg_ParseTuple(args, "s#", &str, &len))
 	return NULL;
 
-    written = 0;
-    do {
-	to_write = len - written;
-	wrote = send(self->fd, str + written, to_write, MSG_NOSIGNAL);
-	if (wrote == -1) {
-	    if (errno == EAGAIN) {
-		coev_wait(self->fd, COEV_WRITE, self->iop_timeout);
-		rv = mod_wait_bottom_half();
-		if (!rv)
-		    return rv;
-		Py_DECREF(rv);
-		continue;
-	    }
-	    return PyErr_SetFromErrno(PyExc_CoroSocketError);
-	}
-	written += wrote;
-
-    } while (to_write);
+    self->busy = 1;
+    Py_BEGIN_ALLOW_THREADS
+    rv = cnrbuf_write(&self->dabuf, str, len);
+    Py_END_ALLOW_THREADS
+    self->busy = 0;
     
-    Py_RETURN_NONE;
+    if (rv == -1)
+        return mod_wait_bottom_half();
+    
+    return PyInt_FromSsize_t(rv);
 }
 
 PyDoc_STRVAR(socketfile_flush_doc,
@@ -1034,15 +539,12 @@ mod_wait(PyObject *a, PyObject* args) {
     int fd, revents;
     double timeout;
     
-    if (CURCORO->switch_veto) {
-        PyErr_SetString(PyExc_CoroSwitchDenied, "mod_wait(): switch prohibited.");
-        return NULL;
-    }
-    
     if (!PyArg_ParseTuple(args, "iid", &fd, &revents, &timeout))
 	return NULL;
     
+    Py_BEGIN_ALLOW_THREADS
     coev_wait(fd, revents, timeout);
+    Py_END_ALLOW_THREADS
     
     return mod_wait_bottom_half();
 }
@@ -1052,8 +554,8 @@ mod_wait_bottom_half(void) {
     coev_t *cur;
 
     cur = coev_current();
-    coro_dprintf("mod_wait_bottom_half(): entered. [%s] %d\n", 
-        cur->treepos, cur->status);
+    coro_dprintf("mod_wait_bottom_half(): entered. [%s] %s\n", 
+        coev_treepos(cur), coev_status(cur));
     
     switch (cur->status) {
         case CSW_EVENT:
@@ -1061,45 +563,19 @@ mod_wait_bottom_half(void) {
             Py_RETURN_NONE;
         case CSW_SIGCHLD:
         {
-            PyCoroutine *dead_meat = COEV2CORO(cur->origin);
-            PyObject *ptype, *pvalue, *ptraceback, *retval, *msg;
+            coev_t *dead_meat = cur->origin;
             
             coro_dprintf("mod_wait_bottom_half(): currnt=[%s] dead_meat=[%s] args=%p\n",
-                cur->treepos, cur->origin->treepos, dead_meat->args);
+                coev_treepos(cur), coev_treepos(dead_meat), dead_meat->A);
             
-            msg = PyString_FromString("postmortem switch into waiting coroutine");
-            if (!msg)
-                Py_FatalError("PyString_FromString returned NULL");
-            PyErr_Fetch(&ptype, &pvalue, &ptraceback);
-            if (ptype) {
-                if (dead_meat->args)
-                    Py_FatalError("dead_meat's args not NULL, but exception is set.");
-                /* death by exception, what a bad timing */
-                PyErr_NormalizeException(&ptype, &pvalue, &ptraceback);
-
-                if (pvalue == NULL) {
-                    pvalue = Py_None;
-                    Py_INCREF(pvalue);
-                }
-                if (ptraceback != NULL) {
-                    /* kill it. KILL KILL KILL  */
-                    Py_CLEAR(ptraceback);
-                }
-                ptraceback = Py_None;
-                Py_INCREF(ptraceback);
-                
-                retval = PyTuple_Pack(4, msg, ptype, pvalue, ptraceback);
-                PyErr_SetObject(PyExc_CoroWaitAbort, retval);
-            } else {
-                if (dead_meat->args == NULL)
-                    Py_FatalError("dead_meat's args are NULL, but no exception is set.");
-                /* death by normal return: shit happens */
-                retval = PyTuple_Pack(2, msg, dead_meat->args);
-                PyErr_SetObject(PyExc_CoroWaitAbort, retval);
-                dead_meat->args = NULL;
-            }
-            coro_dprintf("mod_wait_bottom_half(): CoroWaitAbort set, decreffing [%s]\n", dead_meat->coev.treepos);
-            Py_DECREF(dead_meat);
+            PyErr_Format(PyExc_CoroWaitAbort, "SIGCHLD from [%s] ", coev_treepos(dead_meat));
+            Py_CLEAR(dead_meat->A);
+            coev_fini(dead_meat);
+	    if (dead_meat->id)
+		free(dead_meat);
+	    else
+		Py_FatalError("SIGCHLD from root coro: unpossible.");
+	    cur->status = CSW_VOLUNTARY; /* SIGCHLD handled. */
             return NULL;
         }
         case CSW_VOLUNTARY:
@@ -1112,6 +588,15 @@ mod_wait_bottom_half(void) {
             PyErr_SetString(PyExc_CoroTimeout,
 		    "IO timeout");        
             return NULL;
+        case CSW_IOERROR:
+            /* raise errno-based exception */
+	    {
+		int _err_no = errno;
+		coro_dprintf("mod_wait_bottom_half(): IOERROR %d %s\n",
+		    _err_no, strerror(_err_no));
+		errno = _err_no;
+	    }
+            return PyErr_SetFromErrno(PyExc_CoroSocketError);
         case CSW_NOWHERE_TO_SWITCH:
             /* raise nowhere2switch exception */
             PyErr_SetString(PyExc_CoroNoSchedInRoot,
@@ -1142,15 +627,14 @@ static PyObject *
 mod_sleep(PyObject *a, PyObject *args) {
     double timeout;
     
-    if (CURCORO->switch_veto) {
-        PyErr_SetString(PyExc_CoroSwitchDenied, "mod_wait(): switch prohibited.");
-        return NULL;
-    }    
-    
     if (!PyArg_ParseTuple(args, "d", &timeout))
 	return NULL;
-        
+
+    Py_BEGIN_ALLOW_THREADS
     coev_sleep(timeout);
+    Py_END_ALLOW_THREADS
+        
+    
     return mod_wait_bottom_half();
 }
 
@@ -1166,31 +650,32 @@ args -- a tuple to pass to it \n\
 
 static PyObject *
 mod_schedule(PyObject *a, PyObject *args) {
-    PyCoroutine *target = NULL, *current;
-    PyObject *argstuple;;
+    coev_t *target, *current;
+    PyObject *argstuple;
     int rv;
+    long target_id = 0;
 
-    current = target = CURCORO;
+    current = target = coev_current();
     argstuple = PyTuple_Pack(1, Py_None);
 
-    if (!PyArg_ParseTuple(args, "|O!O!", PyCoroutine_TypePtr, &target, &PyTuple_Type, &argstuple))
+    if (!PyArg_ParseTuple(args, "|lO!", &target_id, &PyTuple_Type, &argstuple))
 	return NULL;
     
-    if ((target == current ) && (current->switch_veto)) {
-        PyErr_SetString(PyExc_CoroSwitchDenied, "mod_schedule(): switch prohibited.");
-        return NULL;
-    }
-
+    target = (coev_t *)target_id;
+    current = coev_current();
+    
     Py_INCREF(argstuple);
-    Py_CLEAR(target->args);
-    target->args = argstuple;
+    Py_CLEAR(target->A);
+    target->A = argstuple;        
     
     if (target == current) {
-        rv = coev_schedule(&target->coev);
+        Py_BEGIN_ALLOW_THREADS
+        rv = coev_schedule(target);
+        Py_END_ALLOW_THREADS
         if (!rv)
             return mod_wait_bottom_half();
     } else {
-        rv = coev_schedule(&target->coev);
+        rv = coev_schedule(target);
     }
      
     switch(rv) {
@@ -1218,19 +703,16 @@ Run scheduler: dispatch pending IO or timer events");
 
 static PyObject *
 mod_scheduler(PyObject *a) {
-    
-    if (CURCORO->switch_veto) {
-        PyErr_SetString(PyExc_CoroSwitchDenied, "mod_scheduler(): switch prohibited.");
-        return NULL;
-    }    
-    
     coro_dprintf("coev.scheduler(): calling coev_loop() (cur=[%s]).\n", 
-        CURCORO->coev.treepos);
+        coev_current()->treepos);
+    Py_BEGIN_ALLOW_THREADS
     coev_loop();
+    Py_END_ALLOW_THREADS    
+    
     /* this returns iff an ev_unloop() has been called. 
     either with coev_unloop() or in interrupt handler. */
     coro_dprintf("coev.scheduler(): coev_loop() returned (cur=[%s]).\n", 
-        CURCORO->coev.treepos);
+        coev_current()->treepos);
     /* return NULL iff this module set up an exception. */
     if (PyErr_Occurred() != NULL)
         return NULL;
@@ -1239,13 +721,11 @@ mod_scheduler(PyObject *a) {
 
 PyDoc_STRVAR(mod_current_doc,
 "current() -> coroutine\n\n\
-Return currently executing coroutine object");
+Return ID of currently executing coroutine object");
 
 static PyObject* 
 mod_current(PyObject *a) {
-    PyObject *current = (PyObject *) CURCORO;
-    Py_INCREF(current);
-    return current; 
+    return PyInt_FromLong( ((long)coev_current()) );
 }
 
 PyDoc_STRVAR(mod_stats_doc,
@@ -1258,12 +738,12 @@ mod_stats(PyObject *a) {
     
     coev_getstats(&sw, &wa, &sl, &bc);
     return Py_BuildValue("{s:K,s:K,s:K,s:K,s:K,s:K}", 
-        "switches",     sw, 
-        "waits",        wa, 
-        "sleeps",       sl, 
-        "bytes_copied", bc, 
-        "created",      module_stats.created, 
-        "destroyed",    module_stats.destroyed );
+        "l.switches",     sw, 
+        "l.waits",        wa, 
+        "l.sleeps",       sl, 
+        "l.bytes_copied", bc, 
+        "m.created",      sw+wa, 
+        "m.destroyed",    sl+bc );
 }
 
 PyDoc_STRVAR(mod_setdebug_doc,
@@ -1274,111 +754,36 @@ switchdump -- dump coev_t structures too.\n");
 
 static PyObject *
 mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {
-    static char *kwds[] = { "module", "library", "switchdump", NULL };
+    static char *kwds[] = { "module", "library", 0 };
     int module = 0;
     int library = 0;
-    int do_dump = 0;
     
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, 
-            "|iii:setdebug", kwds, &module, &library, &do_dump))    
+            "|ii:setdebug", kwds, &module, &library))    
 	return NULL;
     debug_flag = module;
-    coev_setdebug(library, do_dump);
+    coev_setdebug(library);
     
     Py_RETURN_NONE;
 }
 
 static PyMethodDef CoevMethods[] = {
     {   "current", (PyCFunction)mod_current, METH_NOARGS, mod_current_doc },
-    {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS, mod_scheduler_doc },
+    {   "switch", (PyCFunction)mod_switch, METH_VARARGS, mod_switch_doc },
+/*    {   "throw", (PyCFunction)mod_throw, METH_VARARGS, mod_throw_doc }, */
     {   "wait", (PyCFunction)mod_wait, METH_VARARGS, mod_wait_doc },
     {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS, mod_sleep_doc },
+/*    {   "stall", (PyCFunction)mod_stall, METH_VARARGS, mod_stall_doc }, */
+    {   "schedule", (PyCFunction)mod_schedule, METH_VARARGS, mod_schedule_doc},
+    {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS, mod_scheduler_doc },
     {   "stats", (PyCFunction)mod_stats, METH_NOARGS, mod_stats_doc },
     {   "setdebug", (PyCFunction)mod_setdebug,
         METH_VARARGS | METH_KEYWORDS, mod_setdebug_doc },
-    {   "schedule", (PyCFunction) mod_schedule, METH_VARARGS, mod_schedule_doc},
+    {   "getpos", (PyCFunction)mod_getpos, METH_VARARGS, mod_getpos_doc},
         
     { 0 }
 };
 
-/* coev framework */
-
-static void *
-python_augmented_malloc(size_t size) {
-    void *rv;
-    
-    rv = PyMem_Malloc(size);
-    if (rv == NULL)
-	PyErr_NoMemory();
-    return rv;
-    
-}
-
-static void *
-python_augmented_realloc(void *ptr, size_t size) {
-    void *rv;
-    
-    rv = PyMem_Realloc(ptr, size);
-    if (rv == NULL)
-	PyErr_NoMemory();
-    return rv;
-}
-
-static void
-python_augmented_free(void *ptr) {
-    PyMem_Free(ptr);
-}
-
-static void 
-set_xthread_exc(coev_t *a, coev_t *b) {
-    PyErr_SetString(PyExc_CoroError,
-		    "cannot switch to a different thread");
-    Py_XDECREF(COEV2CORO(a)->args);
-}
-
-static void
-set_s2self_exc(coev_t *a) {
-    PyErr_Format(PyExc_CoroError,
-        "cannot switch to itself ([%s])",
-        coev_treepos(coev_current()) );
-    Py_XDECREF(COEV2CORO(a)->args);
-}
-
-static void
-python_augmented_inthdlr(void) {
-    coev_unloop();
-    PyErr_SetNone(PyExc_KeyboardInterrupt);
-}
-
-static void
-Cr_FatalErrno(const char *msg, int e) {
-    char *serr, *rv;
-    size_t len;
-
-    serr = strerror(e);
-    len = strlen(msg) + strlen(serr) + 23;
-    rv = PyMem_Malloc(len);
-    snprintf(rv, len, "%s: [%d] %s", msg, e, serr);
-    Py_FatalError(rv);
-    
-}
-
-coev_frameth_t _cmf = {
-    python_augmented_malloc,    /* malloc */ 
-    python_augmented_realloc,   /* realloc */
-    python_augmented_free,      /* free */
-    set_xthread_exc,            /* crossthread_fail */
-    set_s2self_exc,             /* switch_to_itself fail */
-    NULL,                       /* death - not used. */
-    Py_FatalError,              /* abort */
-    Cr_FatalErrno,              /* abort with errno */
-    python_augmented_inthdlr,   /* unloop at SIGINT */
-    /* debug */
-    NULL,                       /* switch_notify */
-    _coro_dprintf,              /* debug sink */
-    3,                          /* debug output */
-    1                           /* dump coev_t-s */
-};
 
 void 
 initcoev(void) {
@@ -1388,18 +793,16 @@ initcoev(void) {
     if (m == NULL)
         return;
     
-    if (PyModule_AddStringConstant(m, "__version__", "0.4") < 0)
-        return;
-
-    if (PyModule_AddIntConstant(m, "READ", 1) < 0)
+    if (PyModule_AddStringConstant(m, "__version__", "0.5") < 0)
         return;
     
-    if (PyModule_AddIntConstant(m, "WRITE", 2) < 0)
-        return;
+    { /* add constants */
+        int i;
+        for (i = 0; _const_tab[i].name; i++) 
+            if (PyModule_AddIntConstant(m,  _const_tab[i].name,  _const_tab[i].value) < 0)
+                return;
+    }
     
-    if (PyType_Ready(&PyCoroutine_Type) < 0)
-        return;
-
     if (PyType_Ready(&CoroSocketFile_Type) < 0)
         return;
 
@@ -1436,19 +839,11 @@ initcoev(void) {
 
         }
     }
-
-    PyCoroutine_TypePtr = &PyCoroutine_Type;
-    Py_INCREF(&PyCoroutine_Type);
-    PyModule_AddObject(m, "coroutine", (PyObject*) &PyCoroutine_Type);
+    start_time = time(NULL);
+    
+    sf_empty_string = PyString_FromStringAndSize("", 0);
+    Py_INCREF(sf_empty_string);
     
     Py_INCREF(&CoroSocketFile_Type);
     PyModule_AddObject(m, "socketfile", (PyObject*) &CoroSocketFile_Type);
-    {
-        /* initialize coev library */
-        /* coro_main = PyObject_GC_New(PyCoroutine, &PyCoroutine_Type); */
-        coro_main = (PyCoroutine *)PyCoroutine_Type.tp_alloc(&PyCoroutine_Type, 0);
-        coev_libinit(&_cmf, &coro_main->coev);
-        coro_main->switch_veto = 0;
-    }
-    Py_INCREF(coro_main);
 }
