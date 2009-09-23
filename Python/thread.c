@@ -100,6 +100,10 @@ PyThread_init_thread(void)
    or the size specified by the THREAD_STACK_SIZE macro. */
 static size_t _pythread_stacksize = 0;
 
+#ifdef UCOEV_THREADS
+#include "thread_ucoev.h"
+#else
+
 #ifdef SGI_THREADS
 #include "thread_sgi.h"
 #endif
@@ -154,6 +158,8 @@ static size_t _pythread_stacksize = 0;
 #include "thread_foobar.h"
 #endif
 */
+
+#endif /* UCOEV_THREADS */
 
 /* return the current thread stack size */
 size_t
