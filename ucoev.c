@@ -57,6 +57,11 @@
 #define colo_dump(lb) do { if (_fm.debug & CDF_COLOCK_DUMP) \
     _colock_dump(lb); } while(0)
 
+#define cstk_dprintf(fmt, args...) do { if (_fm.debug & CDF_STACK) \
+    _fm.dprintf(fmt, ## args); } while(0)
+
+#define cstk_dump(msg) do { if (_fm.debug & CDF_STACK_DUMP) \
+    _dump_stack_bunch(msg); } while(0)
 
 typedef struct _coev_lock_bunch colbunch_t;
 struct _coev_lock_bunch {
@@ -107,20 +112,20 @@ struct _coev_stack_bunch {
 
 
 static void
-dump_stack_bunch(const char *msg) {
+_dump_stack_bunch(const char *msg) {
     coevst_t *p;
-    coev_dprintf("%s, avail=%p, busy=%p\n\tAVAIL:\n", 
+    cstk_dprintf("%s, avail=%p, busy=%p\n\tAVAIL:\n", 
         msg, ts_stack_bunch.avail, ts_stack_bunch.busy);
     p = ts_stack_bunch.avail;
     while(p) {
-        coev_dprintf("\t<%p>: prev=%p next=%p size=%zd p=%p\n",
+        cstk_dprintf("\t<%p>: prev=%p next=%p size=%zd p=%p\n",
             p, p->prev, p->next, p->size, p->p);
         p = p->next;
     }
-    coev_dprintf("\n\tBUSY:\n");
+    cstk_dprintf("\n\tBUSY:\n");
     p = ts_stack_bunch.busy;
     while(p) {
-        coev_dprintf("\t<%p>: prev=%p next=%p size=%zd p=%p\n",
+        cstk_dprintf("\t<%p>: prev=%p next=%p size=%zd p=%p\n",
             p, p->prev, p->next, p->size, p->p);
         p = p->next;
     }
@@ -132,7 +137,7 @@ static coevst_t *
 _get_a_stack(size_t size) {
     coevst_t *rv, *prev_avail;
     
-    dump_stack_bunch("_get_a_stack()");
+    cstk_dump("_get_a_stack()");
     
     rv = ts_stack_bunch.avail;
     prev_avail = NULL;
@@ -176,14 +181,14 @@ _get_a_stack(size_t size) {
     rv->prev = NULL;
     rv->next = ts_stack_bunch.busy;
     ts_stack_bunch.busy = rv;
-    dump_stack_bunch("_get_a_stack: resulting");
+    cstk_dump("_get_a_stack: resulting");
     return rv;
 }
 
 static void
 _return_a_stack(coevst_t *sp) {
-    coev_dprintf("_return_a_stack(%p)", sp);
-    dump_stack_bunch("");
+    cstk_dprintf("_return_a_stack(%p)", sp);
+    cstk_dump("");
     
     /* 1. remove sp from busy list */
     if (sp->prev)
@@ -201,7 +206,7 @@ _return_a_stack(coevst_t *sp) {
     sp->next = ts_stack_bunch.avail;
     ts_stack_bunch.avail = sp;
     
-    dump_stack_bunch("_return_a_stack: resulting");
+    cstk_dump("_return_a_stack: resulting");
 }
 
 static void
@@ -556,11 +561,17 @@ coev_initialstub(void) {
     
     if (!parent)
         _fm.abort("coev_initialstub(): everyone's dead, how come?");
+    
+    /* that's it. */
+    /* IFF parent is not runnable and there's a scheduler running,
+       switch to scheduler. */
+    if (    (parent->state != CSTATE_RUNNABLE) 
+        && (ts_scheduler.scheduler != NULL ) )
+        parent = ts_scheduler.scheduler;
 
     parent->status = CSW_SIGCHLD;
     parent->origin = self;
     
-    /* that's it. */
     ts_current = parent;
     setcontext(&parent->ctx);
     
@@ -883,6 +894,7 @@ coev_loop(void) {
                     continue;
                 case CSW_SIGCHLD:
                     coev_dprintf("coev_loop(): sigchld from %p [%s]\n", self->origin, self->origin->treepos);
+                    
                     continue;
                 case CSW_SWITCH_TO_SELF:
                     _fm.abort("scheduler wound up in the runq");

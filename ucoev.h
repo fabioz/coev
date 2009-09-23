@@ -338,13 +338,15 @@ void coev_getstats(uint64_t *switches, uint64_t *waits,
     uint64_t *sleeps, uint64_t *bytes_copied);
 
 
-#define CDF_COEV         0x01   /* switches */
-#define CDF_COEV_DUMP    0x02   /* coev state dumps on switches */
-#define CDF_RUNQ_DUMP    0x04   /* runq dumps in scheduler */
-#define CDF_NBUF         0x10   /* reads/writes */
-#define CDF_NBUF_DUMP    0x20   /* buffer metadata before/after */
-#define CDF_COLOCK       0x40   /* locking support */
-#define CDF_COLOCK_DUMP  0x80   /* lock dumps */
+#define CDF_COEV         0x001   /* switches */
+#define CDF_COEV_DUMP    0x002   /* coev state dumps on switches */
+#define CDF_RUNQ_DUMP    0x004   /* runq dumps in scheduler */
+#define CDF_NBUF         0x010   /* reads/writes */
+#define CDF_NBUF_DUMP    0x020   /* buffer metadata before/after */
+#define CDF_COLOCK       0x040   /* locking support */
+#define CDF_COLOCK_DUMP  0x080   /* lock dumps */
+#define CDF_STACK        0x100   /* stack debug */
+#define CDF_STACK_DUMP   0x200   /* stack bunch dumps */
 
 void coev_setdebug(int flagsmask);
 
