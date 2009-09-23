@@ -13,7 +13,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 #ifdef THREADING_MADNESS
 #include <pthread.h>
 #endif
@@ -24,7 +23,7 @@ extern "C" {
 #include <ev.h>
 
 /* coev_t::state */
-#define CSTATE_INIT          0 /* not initialized */
+#define CSTATE_ZERO          0 /* not initialized */
 #define CSTATE_CURRENT       1 /* currently executing */
 #define CSTATE_RUNNABLE      2 /* switched out voluntarily */
 #define CSTATE_SCHEDULED     3 /* in runqueue */
@@ -47,6 +46,7 @@ extern "C" {
 #define CSW_SCHEDULER_NEEDED    11 /* wait, sleep or stall w/o scheduler: please run one (to a parent) */
 #define CSW_WAIT_IN_SCHEDULER   12 /* wait, sleep or stall in the scheduler */
 #define CSW_SWITCH_TO_SELF      13 /* switch to self attempted. */
+#define CSW_IOERROR             14 /* cnrbuf's send or recv encountered an error other than EAGAIN. */
 
 #define CSW_ERROR(c) (  (c)->status  > CSW_LESS_THAN_AN_ERROR )
 
@@ -62,36 +62,27 @@ extern "C" {
 #define COLOCK_PREALLOCATE 64
 #endif
 
-struct _coev_lock;
-typedef struct _coev_lock colock_t;
 
-struct _coev;
 typedef struct _coev coev_t;
 typedef void (*coev_runner_t)(coev_t *);
+typedef struct _coev_lock colock_t;
 
-struct _key_tuple;
-typedef struct _key_tuple cokey_t;
-
-struct _key_chain;
-typedef struct _key_chain cokeychain_t;
-
-struct _coev_lock {
-    colock_t *next;
-    coev_t *owner;
-};
-
-struct _key_tuple {
+typedef struct _key_tuple {
     long key;
     void *value;
-};
+} cokey_t;
 
+typedef struct _key_chain cokeychain_t;
 struct _key_chain {
     cokeychain_t *next;   
     cokey_t keys[CLS_KEYCHAIN_SIZE]; 
 };
 
+typedef struct _coev_stack coevst_t;
+
 struct _coev {
     ucontext_t ctx;     /* the context */
+    coevst_t *stack;    /* to free it fast*/
     unsigned int id;    /* serial, to build debug representations / show tree position */
     int flags;          /* */
     
@@ -113,6 +104,8 @@ struct _coev {
     
     cokeychain_t kc;      /* CLS keychain */
     cokeychain_t *kc_tail; /* CLS meta-keychain tail (if it was ever extended) */
+    
+    void *A, *X, *Y;  /* user-used stuff so that them don't need to fiddle with offsetof (6502 ftw) */
     
 #ifdef THREADING_MADNESS
     pthread_t thread;
@@ -277,7 +270,7 @@ void coev_unloop(void);
 */
 colock_t *colock_allocate(void);
 void  colock_free(colock_t *p);
-void  colock_acquire(colock_t *p);
+int   colock_acquire(colock_t *p, int wf);
 void  colock_release(colock_t *p); 
 
 
@@ -292,7 +285,8 @@ long  cls_new(void);
 void *cls_get(long k);  /* NULL if not found in the current ctx */
 int   cls_set(long k, void *v); /* -1 if value already set. 0 otherwise */
 void  cls_del(long k);  
-void  cls_drop_all(void); /* drops all cls keys */
+void  cls_drop_across(long k); /* drops key from all keychain */
+void  cls_drop_others(void); /* drops all keychains except current */
 
 
 /* Buffered read/write on network sockets
@@ -303,10 +297,10 @@ void  cls_drop_all(void); /* drops all cls keys */
 struct _coev_nrbuf {
     int fd;
     char *in_buffer, *in_position;
-    size_t in_allocated, in_used;
-    size_t in_limit;
+    ssize_t in_allocated, in_used;
+    ssize_t in_limit;
     double iop_timeout;
-    int waiting_for_io;
+    int busy;
 };
 
 typedef struct _coev_nrbuf cnrbuf_t;
@@ -323,7 +317,7 @@ void cnrbuf_fini(cnrbuf_t *buf);
        -1 - see errno, *p not changed
         0 - immediate EOF, *p not changed.
        >0 - *p points into the buffer, where you can get this much bytes.
-       call to cnrbuf_done(rv) is mandatory after you're finished with data.
+       p and bytecount values are valid until next call to read/readline.
 */
 ssize_t cnrbuf_read(cnrbuf_t *buf, void **p, ssize_t hint);
 
@@ -335,9 +329,9 @@ ssize_t cnrbuf_readline(cnrbuf_t *buf, void **p, ssize_t hint);
 void cnrbuf_done(cnrbuf_t *buf, ssize_t eaten);
 
 /* attempt to send given data. 
-   returns 0 on success, or bytecount of data not send if some
+   returns 0 on success, or bytecount of data not sent if some
    failure occured. Consult errno. */
-ssize_t cnrbuf_write(cnrbuf_t *buf, void *data, ssize_t dlen);
+ssize_t cnrbuf_write(cnrbuf_t *buf, const void *data, ssize_t dlen);
 
 /* libwide stuff */
 void coev_getstats(uint64_t *switches, uint64_t *waits, 
@@ -349,6 +343,8 @@ void coev_getstats(uint64_t *switches, uint64_t *waits,
 #define CDF_RUNQ_DUMP    0x04   /* runq dumps in scheduler */
 #define CDF_NBUF         0x10   /* reads/writes */
 #define CDF_NBUF_DUMP    0x20   /* buffer metadata before/after */
+#define CDF_COLOCK       0x40   /* locking support */
+#define CDF_COLOCK_DUMP  0x80   /* lock dumps */
 
 void coev_setdebug(int flagsmask);
 
