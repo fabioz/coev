@@ -38,7 +38,7 @@ extern "C" {
 #define CSW_WAKEUP           3 /* sleep elapsed */
 #define CSW_TIMEOUT          4 /* io-event timed out */
 #define CSW_SIGCHLD          5 /* child died */
-#define CSW_YIELD            6 /* switck back after explicit yield (aka scheduled) */
+#define CSW_YIELD            6 /* switch back after explicit yield (aka scheduled) */
 
 /* below are immediate (no actual switch) error return values */
 #define CSW_LESS_THAN_AN_ERROR   9 /* used to distinguish errors, never actually returned. */
