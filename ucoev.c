@@ -394,7 +394,8 @@ str_coev_state[] = {
     "SCHEDULED",
     "IOWAIT   ",
     "SLEEP    ",
-    "DEAD     "
+    "DEAD     ",
+    0
 };
 
 static const char* 
@@ -404,16 +405,15 @@ str_coev_status[] = {
     "EVENT    ",
     "WAKEUP   ",
     "TIMEOUT  ",
-    "SIGCHLD  ",
     "YIELD    ",
+    "SIGCHLD  ",
     "(not defined)",
     "(not defined)",
-    "LESS_THAN_AN_ERROR",
-    "NOWHERE_TO_SWITCH",
     "SCHEDULER_NEEDED ",
-    "WAIT_IN_SCHEDULER",
-    "SWITCH_TO_SELF   ",
-    "IOERROR"
+    "TARGET_SELF",
+    "TARGET_DEAD",
+    "TARGET_BUSY",
+    0
 };
 
 const char* 

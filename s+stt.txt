@@ -40,8 +40,8 @@ CSW_NONE             there was no switch. Initial stt for the root coroutine, an
 CSW_VOLUNTARY        explicit switch, not from the scheduler.
 
 CSW_EVENT            io-event fired
-CSW_TIMEOUT          io-event timed out
 CSW_WAKEUP           sleep elapsed
+CSW_TIMEOUT          io-event timed out
 CSW_YOURTURN         target was explicitly scheduled before
 
 CSW_SIGCHLD          child died
@@ -58,7 +58,6 @@ CSW_SCHEDULER_NEEDED    wait, sleep or stall w/o scheduler: please run one.
 CSW_TARGET_SELF         explicit switch to self attempted.
 CSW_TARGET_DEAD         switch to/schedule of a dead coroutine attempted.
 CSW_TARGET_BUSY         explicit switch to a coroutine that has an active event watcher
-CSW_IOERROR             cnrbuf's send or recv encountered an error other than EAGAIN.
 
 
 Control transfer out of dead coroutine. 

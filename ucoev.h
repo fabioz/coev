@@ -37,18 +37,18 @@ extern "C" {
 #define CSW_EVENT            2 /* io-event fired */
 #define CSW_WAKEUP           3 /* sleep elapsed */
 #define CSW_TIMEOUT          4 /* io-event timed out */
-#define CSW_SIGCHLD          5 /* child died */
-#define CSW_YIELD            6 /* switch back after explicit yield (aka scheduled) */
+#define CSW_YOURTURN         5 /* explicity scheduled switch */
+#define CSW_SIGCHLD          6 /* child died */
 
 /* below are immediate (no actual switch) error return values */
 #define CSW_LESS_THAN_AN_ERROR   9 /* used to distinguish errors, never actually returned. */
-#define CSW_NOWHERE_TO_SWITCH   10 /* wait, sleep or stall w/o scheduler and no one to ask for one */
-#define CSW_SCHEDULER_NEEDED    11 /* wait, sleep or stall w/o scheduler: please run one (to a parent) */
-#define CSW_WAIT_IN_SCHEDULER   12 /* wait, sleep or stall in the scheduler */
-#define CSW_SWITCH_TO_SELF      13 /* switch to self attempted. */
-#define CSW_IOERROR             14 /* cnrbuf's send or recv encountered an error other than EAGAIN. */
+#define CSW_SCHEDULER_NEEDED    10 /* wait, sleep or stall w/o scheduler: please run one */
+#define CSW_TARGET_SELF         11 /* switch to self attempted. */
+#define CSW_TARGET_DEAD         12 /* switch to/scheduling of a dead coroutine attempted  */
+#define CSW_TARGET_BUSY         13 /* switch to/scheduling of a coroutine with active event watcher attempted */
 
-#define CSW_ERROR(c) (  (c)->status  > CSW_LESS_THAN_AN_ERROR )
+
+#define CSW_ERROR(c) ( (c)->status  > CSW_LESS_THAN_AN_ERROR )
 
 /* This is preallocated size for (T)CLS storage.
    that much pointers can be stored per coroutine
