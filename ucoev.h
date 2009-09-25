@@ -236,15 +236,14 @@ void coev_sleep(ev_tstamp timeout);
 #define CSCHED_NOERROR          0  /* no error */
 #define CSCHED_DEADMEAT         1  /* attempt to schedule dead coroutine */
 #define CSCHED_ALREADY          2  /* attempt to schedule already scheduled coroutine */
-#define CSCHED_NOSCHEDULER      3  /* attempt to yield, but no scheduler to switch to */
+#define CSCHED_NOSCHEDULER      3  /* attempt to yield, but no scheduler to switch to (from coev_stall() only) */
 
 /* schedule a switch to the waiter */
 int coev_schedule(coev_t *waiter);
 
 /* switch to scheduler until something happens.
-   same as coev_schedule(coev_current), but
-   abort on error. */
-void coev_stall(void);
+   returns 0 on success, CSCHED_* on error */
+int coev_stall(void);
 
 /* must be called for IO scheduling to begin. */
 void coev_loop(void);
@@ -300,7 +299,8 @@ struct _coev_nrbuf {
     ssize_t in_allocated, in_used;
     ssize_t in_limit;
     double iop_timeout;
-    int busy;
+    coev_t *owner; /* if waiting on socket, who called the wait(). */
+    int err_no; /* saved errno */
 };
 
 typedef struct _coev_nrbuf cnrbuf_t;
@@ -329,9 +329,9 @@ ssize_t cnrbuf_readline(cnrbuf_t *buf, void **p, ssize_t hint);
 void cnrbuf_done(cnrbuf_t *buf, ssize_t eaten);
 
 /* attempt to send given data. 
-   returns 0 on success, or bytecount of data not sent if some
-   failure occured. Consult errno. */
-ssize_t cnrbuf_write(cnrbuf_t *buf, const void *data, ssize_t dlen);
+   returns 0 on success, or -1 on error, consult errno.
+   bytecount of data sent is always stored in *sent. */
+int cnrbuf_write(int fd, const void *data, ssize_t dlen, ssize_t *sent, double timeout);
 
 /* libwide stuff */
 void coev_getstats(uint64_t *switches, uint64_t *waits, 

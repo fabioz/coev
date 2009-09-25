@@ -47,6 +47,7 @@ CSW_YOURTURN         target was explicitly scheduled before
 CSW_SIGCHLD          child died
 
 
+
 Errors:
 Explicit switch is an explicit call of coev_switch(). The other types of switch are two:
 child death and from the scheduler.
@@ -103,11 +104,21 @@ One iteration of scheduler's main loop looks like:
   
 
 
+cnrbuf_t error reporting.
+
+return -1, set errno.
 
 
+read, readline: returns whatever there is in the buffer. When there is no data to return (on a subsequent call maybe), 
+returns -1 and sets errno to whatever it was.
+if the error resulted from coev_wait():
+    ETIMEDOUT if timeout 
+    EINTR if voluntary switches into waiters are supported and such a switch took place.
 
+write: no relation to cnrbuf_t any more. returns -1 on error. 
+Amount sent is always returned in separate var.
 
-
+Operation on a busy (in use by some other coroutine) cnrbuf_t object: result not defined.
 
 
 
