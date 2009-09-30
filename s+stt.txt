@@ -109,7 +109,8 @@ cnrbuf_t error reporting.
 return -1, set errno.
 
 
-read, readline: returns whatever there is in the buffer. When there is no data to return (on a subsequent call maybe), 
+read, readline: returns whatever there is in the buffer.
+When there is no data to return (on a subsequent call maybe), 
 returns -1 and sets errno to whatever it was.
 if the error resulted from coev_wait():
     ETIMEDOUT if timeout 

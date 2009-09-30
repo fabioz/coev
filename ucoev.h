@@ -331,7 +331,7 @@ void cnrbuf_done(cnrbuf_t *buf, ssize_t eaten);
 /* attempt to send given data. 
    returns 0 on success, or -1 on error, consult errno.
    bytecount of data sent is always stored in *sent. */
-int cnrbuf_write(int fd, const void *data, ssize_t dlen, ssize_t *sent, double timeout);
+int coev_send(int fd, const void *data, ssize_t dlen, ssize_t *sent, double timeout);
 
 /* libwide stuff */
 void coev_getstats(uint64_t *switches, uint64_t *waits, 

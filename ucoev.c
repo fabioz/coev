@@ -407,10 +407,11 @@ str_coev_status[] = {
     "EVENT    ",
     "WAKEUP   ",
     "TIMEOUT  ",
-    "YIELD    ",
+    "YOURTURN ",
     "SIGCHLD  ",
     "(not defined)",
     "(not defined)",
+    "(less than an error)",
     "SCHEDULER_NEEDED ",
     "TARGET_SELF",
     "TARGET_DEAD",
@@ -651,8 +652,10 @@ coev_schedule(coev_t *waiter) {
             _fm.abort("coev_schedule(): invalid coev_t::state");
     }
     
-    waiter->status = CSTATE_SCHEDULED;
+    waiter->state = CSTATE_SCHEDULED;
     coev_runq_append(waiter);
+    coev_dprintf("coev_schedule: [%s] %s scheduled.\n",
+        waiter->treepos, str_coev_state[waiter->state]);
     return 0;
 }
 
@@ -665,6 +668,7 @@ coev_stall(void) {
             return rv;
         coev_switch(ts_scheduler.scheduler);
         /* FIXME: switch may fail, though it should be impossible. */
+        /* TODO: assert we're here from scheduler. */
         return 0;
     }
     return CSCHED_NOSCHEDULER;
@@ -684,7 +688,7 @@ io_callback(struct ev_loop *loop, ev_io *w, int revents) {
     coev_runq_append(waiter);
     ts_scheduler.waiters -= 1;
     
-    coev_dprintf("io_callback(): [%s]. revents=%d\n", waiter->treepos, revents);
+    coev_dprintf("io_callback(): [%s] revents=%d\n", waiter->treepos, revents);
 }
 
 static void
@@ -701,7 +705,7 @@ iotimeout_callback(struct ev_loop *loop, ev_timer *w, int revents) {
     coev_runq_append(waiter);
     ts_scheduler.waiters -= 1;
     
-    coev_dprintf("iotimeout_callback(): [%s]. revents=%d\n", waiter->treepos);
+    coev_dprintf("iotimeout_callback(): [%s].\n", waiter->treepos);
 }
 
 static void
@@ -729,6 +733,9 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
         self->parent ? self->parent->treepos : "none");
 
     if ((!ts_scheduler.scheduler) || (ts_scheduler.scheduler->state != CSTATE_RUNNABLE)) {
+        coev_dprintf("ts_scheduler.scheduler %p, state %s\n",
+            ts_scheduler.scheduler,
+            ts_scheduler.scheduler ?  str_coev_state[ts_scheduler.scheduler->state] : "none");
         self->status = CSW_SCHEDULER_NEEDED;
         self->origin = self;
         return;
@@ -776,10 +783,14 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
         self->state = CSTATE_IOWAIT;
     }
     
+    ts_scheduler.waiters += 1;
+    
+    coev_dprintf("coev_wait(): switching to scheduler\n");
     ts_scheduler.scheduler->state = CSTATE_CURRENT;
     ts_scheduler.scheduler->status = CSW_VOLUNTARY;
     ts_scheduler.scheduler->origin = self;
-    ts_scheduler.waiters += 1;
+    ts_current = ts_scheduler.scheduler;
+    
     
     if (swapcontext(&self->ctx, &ts_scheduler.scheduler->ctx) == -1)
         _fm.abort("coev_scheduled_switch(): swapcontext() failed.");
@@ -797,6 +808,9 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
             str_coev_status[self->status]);
         _fm.abort("unscheduled switch into event-waiting coroutine");
     }
+    coev_dprintf("coev_wait(): [%s] switch back from [%s] %s CSW: %s\n", 
+        self->treepos, self->origin->treepos,
+        str_coev_state[self->origin->state],  str_coev_status[self->status]);
 }
 
 void
@@ -839,8 +853,10 @@ coev_loop(void) {
     
     do {
 	coev_t *target, *runq_head;
-
+        
+        
 	dump_runqueue("coev_loop(): runqueue before running it");
+        coev_dprintf("coev_loop(): %d waiters\n", ts_scheduler.waiters);
 	
         /* guard against infinite loop in scheduler in case something 
            schedules itself over and over */
@@ -864,7 +880,9 @@ coev_loop(void) {
             coev_dprintf("coev_scheduler(): switching to [%s] %s %s\n",
                     target->treepos, str_coev_state[target->state], str_coev_status[target->status]);
             
+            ts_current->state = CSTATE_RUNNABLE;
             target->origin = (coev_t *) ts_current;
+            target->state = CSTATE_CURRENT;
             ts_current = target;
 
             if (swapcontext(&target->origin->ctx, &target->ctx) == -1)
@@ -878,7 +896,7 @@ coev_loop(void) {
                     coev_dprintf("coev_loop(): sigchld from %p [%s] ignored.\n", ts_current->origin, ts_current->origin->treepos);
                     break;
                 default:
-                    coev_dprintf("Unexpected switch to scheduler\n");
+                    coev_dprintf("Unexpected switch to scheduler (i'm [%s])\n", ts_current->treepos);
                     coev_dump("origin", ts_current->origin); 
                     coev_dump("self", (coev_t *)ts_current);
                     _fm.abort("unexpected switch to scheduler");
@@ -886,6 +904,7 @@ coev_loop(void) {
 	}
         
 	dump_runqueue("coev_loop(): runqueue after running it");
+        coev_dprintf("coev_loop(): %d waiters\n", ts_scheduler.waiters);
         
 	if (ts_scheduler.runq_head != NULL) 
 	    ev_loop(ts_scheduler.loop, EVLOOP_NONBLOCK);
@@ -894,7 +913,7 @@ coev_loop(void) {
                 ev_loop(ts_scheduler.loop, EVLOOP_ONESHOT);
             else 
                 break;
-    } while (ts_scheduler.stop_flag);
+    } while (!ts_scheduler.stop_flag);
     
     ts_scheduler.scheduler = NULL;
     coev_dprintf("coev_loop(): scheduler exited.\n");
@@ -1345,8 +1364,10 @@ cnrbuf_read(cnrbuf_t *self, void **p, ssize_t sizehint) {
             else 
                 to_read = self->in_limit - self->in_used;            
     
-        if ( sf_reshuffle_buffer(self, to_read) )
-            return -1;
+        if ( sf_reshuffle_buffer(self, to_read) ) {
+            self->err_no = ENOMEM;
+            return 0;
+        }
         	
 	readen = recv(self->fd, self->in_position + self->in_used, to_read, 0);
         cnrb_dprintf("cnrbuf_read(): %zd bytes read into %p, reqd len %zd\n", 
@@ -1477,13 +1498,15 @@ cnrbuf_readline(cnrbuf_t *self, void **p, ssize_t sizehint) {
             else 
                 to_read = self->in_limit - self->in_used;
             
-        if ( sf_reshuffle_buffer(self, to_read) )
-            return -1; /* ENOMEM */
-        
-	readen = recv(self->fd, self->in_position + self->in_used, 
-		      to_read, 0);
-        cnrb_dprintf("cnrbuf_readline: %zd bytes read into %p, reqd len %zd\n", 
-                readen, self->in_position + self->in_used, to_read );
+        if ( sf_reshuffle_buffer(self, to_read) ) {
+            self->err_no = ENOMEM;
+            return 0;
+        }
+readagain:
+	readen = recv(self->fd, self->in_position + self->in_used, to_read, 0);
+        cnrb_dprintf("cnrbuf_readline: %zd bytes read into %p, reqd len %zd errno %s\n", 
+                readen, self->in_position + self->in_used, to_read, 
+                readen==-1? strerror(errno): "none");
         if (readen > 0) {
             /* woo we read something */
             char *old_position = self->in_position + self->in_used;
@@ -1497,8 +1520,10 @@ cnrbuf_readline(cnrbuf_t *self, void **p, ssize_t sizehint) {
 	if (readen == -1) {
 	    if (errno == EAGAIN) {
 		coev_wait(self->fd, COEV_READ, self->iop_timeout);
-                if (ts_current->status == CSW_EVENT)
-                    continue;
+                if (ts_current->status == CSW_EVENT) {
+                    cnrb_dprintf("cnrbuf_readline: CSW_EVENT after wait, continuing\n");
+                    goto readagain;
+                }
                 
 		if (ts_current->status == CSW_TIMEOUT)
                     self->err_no = ETIMEDOUT;
@@ -1510,7 +1535,8 @@ cnrbuf_readline(cnrbuf_t *self, void **p, ssize_t sizehint) {
 	}
 
     } while(readen > 0);
-
+    cnrb_dprintf("cnrbuf_readline: readen==0\n");
+    
     /* error and no data to return */
     if ((self->in_used == 0) && (self->err_no != 0)) {
         errno = self->err_no;
