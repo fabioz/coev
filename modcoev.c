@@ -53,8 +53,14 @@ static struct _const_def {
 static PyObject* PyExc_CoroError;
 static PyObject* PyExc_CoroExit;
 static PyObject* PyExc_CoroTimeout;
+
 static PyObject* PyExc_CoroWaitAbort;
-static PyObject* PyExc_CoroNoSchedInRoot;
+
+static PyObject* PyExc_CoroNoScheduler;
+static PyObject* PyExc_CoroTargetSelf;
+static PyObject* PyExc_CoroTargetDead;
+static PyObject* PyExc_CoroTargetBusy;
+
 static PyObject* PyExc_CoroSocketError;
 
 static struct _exc_def {
@@ -72,7 +78,7 @@ static struct _exc_def {
     {
         &PyExc_CoroWaitAbort, &PyExc_CoroError,
         "coev.WaitAbort", "WaitAbort",
-        "unscheduled switch into waiting or sleeping coroutine"
+        "unscheduled switch into waiting or sleeping coroutine (unused as of now)"
     },
     {
         &PyExc_CoroTimeout, &PyExc_CoroError,
@@ -80,22 +86,37 @@ static struct _exc_def {
         "timeout on wait"
     },
     {
-        &PyExc_CoroNoSchedInRoot, &PyExc_CoroError,
-        "coev.NoSchedInRoot", "NoSchedInRoot",
-        "no scheduler while wait/sleep called in root coroutine"
+        &PyExc_CoroNoScheduler, &PyExc_CoroError,
+        "coev.NoScheduler", "NoScheduler",
+        "requested operation requires active scheduler"
     },
     {
-        &PyExc_CoroExit, &PyExc_CoroError,
-        "coev.Exit", "Exit",
-        "coev.Exit\n\
-This special exception does not propagate to the parent coroutine; it\n\
-can be used to kill a single coroutine.\n"
+        &PyExc_CoroTargetSelf, &PyExc_CoroError,
+        "coev.TargetSelf", "TargetSelf",
+        "switch to self attempted"
+    },
+    {
+        &PyExc_CoroTargetDead, &PyExc_CoroError,
+        "coev.TargetDead", "TargetDead",
+        "switch to or scheduling of dead coroutine attempted"
+    },
+    {
+        &PyExc_CoroTargetBusy, &PyExc_CoroError,
+        "coev.TargetBusy", "TargetBusy",
+        "switch to or scheduling of a coroutine with an active event watcher attempted\n"
     },
     {
         &PyExc_CoroSocketError, &PyExc_CoroError,
         "coev.SocketError", "SocketError",
         "ask Captain Obvious\n"
     },
+    
+#define CSW_TARGET_SELF         11 /* switch to self attempted. */
+#define CSW_TARGET_DEAD         12 /* switch to/scheduling of a dead coroutine attempted  */
+#define CSW_TARGET_BUSY         13 /* switch to/scheduling of a coroutine with active event watcher attempted */
+#define CSCHED_DEADMEAT         1  /* attempt to schedule dead coroutine */
+#define CSCHED_ALREADY          2  /* attempt to schedule already scheduled coroutine */
+#define CSCHED_NOSCHEDULER      3  /* attempt to yield, but no scheduler to switch to (from coev_stall() only) */
     { 0 }
 };
 
@@ -196,14 +217,16 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
             Py_CLEAR(self->A);
             Py_CLEAR(dead_meat->A);
             coev_fini(dead_meat);
+#ifdef WANNA_DIE_A_HORRIBLE_DEATH
             free(dead_meat);
+#endif
             Py_RETURN_NONE;
             
         case CSW_SCHEDULER_NEEDED:
             Py_CLEAR(self->A);
             Py_RETURN_NONE;
         
-        case CSW_SWITCH_TO_SELF:
+        case CSW_TARGET_SELF:
             Py_CLEAR(self->A);
             PyErr_SetString(PyExc_CoroError,
 		    "switch(): attempt to switch to self");
@@ -213,8 +236,7 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
         case CSW_EVENT:     /* should only be seen in coev_scheduled_switch(), not here. */
         case CSW_WAKEUP:    /* same. */
         case CSW_TIMEOUT:   /* same. */
-        case CSW_NOWHERE_TO_SWITCH: /* same. */
-        case CSW_WAIT_IN_SCHEDULER: /* should only be seen in wait()/sleep(). */
+        case CSW_YOURTURN:  /* same. */
         default:
             Py_CLEAR(self->A);
             PyErr_Format(PyExc_CoroError,
@@ -387,7 +409,7 @@ socketfile_read(CoroSocketFile *self, PyObject* args) {
     self->busy = 0;
     
     if (rv == -1)
-        return mod_wait_bottom_half();
+        return PyErr_SetFromErrno(PyExc_CoroSocketError);
     
     if (rv == 0)
         RETURN_EMPTYSTRING_IF((self->eof = 1));
@@ -414,19 +436,23 @@ socketfile_readline(CoroSocketFile *self, PyObject* args) {
 
     RETURN_EMPTYSTRING_IF(self->eof);
     
-    
     self->busy = 1;
     Py_BEGIN_ALLOW_THREADS
     rv = cnrbuf_readline(&self->dabuf, &p, sizehint);
     Py_END_ALLOW_THREADS
     self->busy = 0;
     
-    if (rv == -1) 
-        return mod_wait_bottom_half();
+    if (rv == -1) {
+        coro_dprintf("socketfile_readline(): setting exception errno=%s\n", strerror(errno));
+        return PyErr_SetFromErrno(PyExc_CoroSocketError);
+    }
     
-    if (rv == 0)
+    if (rv == 0) {
+        coro_dprintf("socketfile_readline(): EOF, returning empty string.\n");
         RETURN_EMPTYSTRING_IF((self->eof = 1));
+    }
     
+    coro_dprintf("socketfile_readline(): returning %d bytes\n", rv);
     return PyString_FromStringAndSize(p, rv);
 }
 
@@ -437,7 +463,7 @@ Write the string to the fd. EPIPE results in an exception.\n\
 static PyObject * 
 socketfile_write(CoroSocketFile *self, PyObject* args) {
     const char *str;
-    Py_ssize_t rv, len;
+    Py_ssize_t rv, len, written;
 
     if (self->busy)
         return PyErr_SetString(PyExc_CoroError, "socketfile is busy"), NULL;
@@ -447,12 +473,12 @@ socketfile_write(CoroSocketFile *self, PyObject* args) {
 
     self->busy = 1;
     Py_BEGIN_ALLOW_THREADS
-    rv = cnrbuf_write(&self->dabuf, str, len);
+    rv = coev_send(self->dabuf.fd, str, len, &written, self->dabuf.iop_timeout);
     Py_END_ALLOW_THREADS
     self->busy = 0;
     
     if (rv == -1)
-        return mod_wait_bottom_half();
+        return PyErr_SetFromErrno(PyExc_CoroSocketError);
     
     return PyInt_FromSsize_t(rv);
 }
@@ -588,30 +614,14 @@ mod_wait_bottom_half(void) {
             PyErr_SetString(PyExc_CoroTimeout,
 		    "IO timeout");        
             return NULL;
-        case CSW_IOERROR:
-            /* raise errno-based exception */
-	    {
-		int _err_no = errno;
-		coro_dprintf("mod_wait_bottom_half(): IOERROR %d %s\n",
-		    _err_no, strerror(_err_no));
-		errno = _err_no;
-	    }
-            return PyErr_SetFromErrno(PyExc_CoroSocketError);
-        case CSW_NOWHERE_TO_SWITCH:
-            /* raise nowhere2switch exception */
-            PyErr_SetString(PyExc_CoroNoSchedInRoot,
-		    "request to wait for IO in root coroutine without a scheduler");
-            return NULL;
-	case CSW_WAIT_IN_SCHEDULER:
+        case CSW_TARGET_DEAD:
+        case CSW_TARGET_BUSY:
+	case CSW_TARGET_SELF:
             PyErr_SetString(PyExc_CoroError,
-		    "wait(): CSW_WAIT_IN_SCHEDULER");
-            return NULL;
-	case CSW_SWITCH_TO_SELF:
-            PyErr_SetString(PyExc_CoroError,
-		    "wait(): CSW_SWITCH_TO_SELF");
+		    "wait(): CSW_SWITCH_TO_SELF/DEAD/BUSY");
             return NULL;
         default:
-            /* raise timeout exception */
+            coro_dprintf("wait(): unknown switchback type %d\n", cur->status);
             PyErr_SetString(PyExc_CoroError,
 		    "wait(): unknown switchback type");
             return NULL;
@@ -762,6 +772,7 @@ mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {
             "|ii:setdebug", kwds, &module, &library))    
 	return NULL;
     debug_flag = module;
+    coro_dprintf("mod_setdebug(%x,%x)\n", debug_flag, library);
     coev_setdebug(library);
     
     Py_RETURN_NONE;
