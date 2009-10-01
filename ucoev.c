@@ -1368,7 +1368,7 @@ cnrbuf_read(cnrbuf_t *self, void **p, ssize_t sizehint) {
             self->err_no = ENOMEM;
             return 0;
         }
-        	
+rerecv:
 	readen = recv(self->fd, self->in_position + self->in_used, to_read, 0);
         cnrb_dprintf("cnrbuf_read(): %zd bytes read into %p, reqd len %zd\n", 
             readen, self->in_position + self->in_used, to_read);
@@ -1378,7 +1378,7 @@ cnrbuf_read(cnrbuf_t *self, void **p, ssize_t sizehint) {
 	    if (errno == EAGAIN) {
 		coev_wait(self->fd, COEV_READ, self->iop_timeout);
                 if (ts_current->status == CSW_EVENT)
-                    continue;
+                    goto rerecv;
                 
 		if (ts_current->status == CSW_TIMEOUT)
                     self->err_no = ETIMEDOUT;
@@ -1502,7 +1502,7 @@ cnrbuf_readline(cnrbuf_t *self, void **p, ssize_t sizehint) {
             self->err_no = ENOMEM;
             return 0;
         }
-readagain:
+rerecv:
 	readen = recv(self->fd, self->in_position + self->in_used, to_read, 0);
         cnrb_dprintf("cnrbuf_readline: %zd bytes read into %p, reqd len %zd errno %s\n", 
                 readen, self->in_position + self->in_used, to_read, 
@@ -1522,7 +1522,7 @@ readagain:
 		coev_wait(self->fd, COEV_READ, self->iop_timeout);
                 if (ts_current->status == CSW_EVENT) {
                     cnrb_dprintf("cnrbuf_readline: CSW_EVENT after wait, continuing\n");
-                    goto readagain;
+                    goto rerecv;
                 }
                 
 		if (ts_current->status == CSW_TIMEOUT)
