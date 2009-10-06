@@ -1,4 +1,6 @@
-CFLAGS=-fwrapv -O2 -fno-strict-aliasing -Wstrict-prototypes -g -Wall -fPIC
+CFLAGS=-fwrapv -O2 -fno-strict-aliasing -Wstrict-prototypes -g -Wall -fPIC 
+CFLAGS+=-DHAVE_VALGRIND -I/usr/include/valgrind
+
 PREFIX?=~/prefix
 
 #CFLAGS+=-pthread -DTHREADING_MADNESS

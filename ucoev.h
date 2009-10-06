@@ -245,8 +245,10 @@ int coev_schedule(coev_t *waiter);
    returns 0 on success, CSCHED_* on error */
 int coev_stall(void);
 
-/* must be called for IO scheduling to begin. */
-void coev_loop(void);
+/* must be called for IO scheduling to begin. 
+   returns current scheduler and does nothing if there is one running. 
+   returns NULL after runqueue and I/O waiters are exhausted. */
+coev_t *coev_loop(void);
 
 /* can be called anywhere to stop and return from the coev_loop().
 does not perform a switch to scheduler. */
