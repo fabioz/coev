@@ -84,7 +84,6 @@ struct _coev {
     ucontext_t ctx;     /* the context */
     coevst_t *stack;    /* to free it fast*/
     unsigned int id;    /* serial, to build debug representations / show tree position */
-    int flags;          /* */
     
     coev_t *parent;     /* report death here */
 
@@ -92,6 +91,7 @@ struct _coev {
     int state;          /* CSTATE_* -- state of this coroutine */
     int status;         /* CSW_*  -- status of last switch into this coroutine */
     char *treepos;      /* position in the tree */
+    unsigned int child_count; /* internal refcount */
     
     coev_runner_t run;  /* entry point into the coroutine, NULL if the coro has already started. */
     
@@ -99,8 +99,9 @@ struct _coev {
     struct ev_timer io_timer;    /* IO timeout timer. */
     struct ev_timer sleep_timer; /* sleep timer */
     
-    coev_t *next;         /* runqueue list pointer */
-    int ran_out_of_order; /* already ran flag */
+    coev_t *rq_next;         /* runqueue list pointer */
+    coev_t *cb_next;   /* allocator internals */
+    coev_t *cb_prev;   /* allocator internals */
     
     cokeychain_t kc;      /* CLS keychain */
     cokeychain_t *kc_tail; /* CLS meta-keychain tail (if it was ever extended) */
@@ -195,17 +196,20 @@ typedef struct _coev_framework_methods {
     
     /* statistics: */
     volatile uint64_t c_switches;
-    volatile uint64_t c_bytes_copied;
     volatile uint64_t c_waits;
     volatile uint64_t c_sleeps;
+    volatile uint64_t stacks_free;
+    volatile uint64_t stacks_used;
+    volatile uint64_t coevs_free;
+    volatile uint64_t coevs_used;
+    volatile uint64_t coevs_dead;
     
 } coev_frameth_t;
 
 void coev_libinit(const coev_frameth_t *fm, coev_t *root);
 void coev_libfini(void);
 
-void coev_init(coev_t *child, coev_runner_t runner, size_t stacksize);
-void coev_fini(coev_t *corpse);
+coev_t *coev_new(coev_runner_t runner, size_t stacksize);
 
 coev_t *coev_current(void);
 /* returns 0 on success or -1 if a cycle would result */
@@ -336,8 +340,9 @@ void cnrbuf_done(cnrbuf_t *buf, ssize_t eaten);
 int coev_send(int fd, const void *data, ssize_t dlen, ssize_t *sent, double timeout);
 
 /* libwide stuff */
-void coev_getstats(uint64_t *switches, uint64_t *waits, 
-    uint64_t *sleeps, uint64_t *bytes_copied);
+#define COEV_STAT_COUNT 8
+extern const char const *coev_stat_names[];
+void coev_getstats(uint64_t *ary);
 
 
 #define CDF_COEV         0x001   /* switches */

@@ -8,7 +8,6 @@
  *
  */
 
-#define CUSTOM_STACK_ALLOCATOR
 
 #include <string.h>
 #include <stddef.h>
@@ -117,9 +116,6 @@ struct _coev_stack_bunch {
     coevst_t *busy;
 } ts_stack_bunch;
 
-#ifdef CUSTOM_STACK_ALLOCATOR
-
-
 static void
 _dump_stack_bunch(const char *msg) {
     coevst_t *p;
@@ -161,11 +157,11 @@ _get_a_stack(size_t size) {
 #ifdef MMAP_STACK
         rv = mmap(NULL, to_allocate, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); 
         if (fv == MAP_FAILED)
-            _fm.eabort("coev_init(): mmap() stack allocation failed", errno);
+            _fm.eabort("_get_a_stack(): mmap() stack allocation failed", errno);
 #else
         rv = malloc(to_allocate);
         if (rv == NULL)
-           _fm.abort("coev_init(): malloc() stack allocation failed");
+           _fm.abort("_get_a_stack(): malloc() stack allocation failed");
 #endif
         rv->size = size;
         rv->p = ((char *)rv ) + sizeof(coevst_t);
@@ -181,6 +177,7 @@ _get_a_stack(size_t size) {
         else
             /* head of the avail list */
             ts_stack_bunch.avail = rv->next;
+        _fm.stacks_free --;        
     }
     
     /* add to the head of the busy list */
@@ -194,6 +191,8 @@ _get_a_stack(size_t size) {
     rv->next = ts_stack_bunch.busy;
     ts_stack_bunch.busy = rv;
     cstk_dump("_get_a_stack: resulting");
+    
+    _fm.stacks_used ++;
     return rv;
 }
 
@@ -209,7 +208,8 @@ _return_a_stack(coevst_t *sp) {
         sp->next->prev = sp->prev;
     if (sp == ts_stack_bunch.busy) {
         ts_stack_bunch.busy = sp->next;
-        ts_stack_bunch.busy->prev = NULL;
+        if (ts_stack_bunch.busy)
+            ts_stack_bunch.busy->prev = NULL;
     }
     
     /* 2. add sp to avail list */
@@ -219,6 +219,9 @@ _return_a_stack(coevst_t *sp) {
     ts_stack_bunch.avail = sp;
     
     cstk_dump("_return_a_stack: resulting");
+    
+    _fm.stacks_free ++;
+    _fm.stacks_used --;
 }
 
 static void
@@ -252,23 +255,111 @@ _free_stacks(void) {
         spb = spbn;
         
     }
+    _fm.stacks_free = 0;
+    _fm.stacks_used = 0;
 }
-#else
-static coevst_t *
-_get_a_stack(size_t size) {
-    coevst_t *rv = malloc(size+sizeof(coevst_t));
-    rv->size = size;
-    rv->next = NULL;
-    rv->p = ((char *)rv) + sizeof(coevst_t);
+
+/* the last, I hope, custom allocator, for the coev_t-s themselves. */
+
+static 
+struct _coev_t_bunch {
+    coev_t *avail;
+    coev_t *busy;
+} ts_coev_bunch;
+
+static coev_t *
+_get_a_coev(void) {
+    coev_t *rv, *prev_avail;
+    
+    rv = ts_coev_bunch.avail;
+    prev_avail = NULL;
+
+    if (!rv) {
+        rv = malloc(sizeof(coev_t));
+        if (rv == NULL)
+           _fm.abort("_get_a_coev(): malloc() failed");
+        
+    } else {
+        /* remove from the avail list if we took it from there */
+        if (prev_avail)
+            /* middle or end of the avail list */
+            prev_avail->cb_next = rv->cb_next;
+        else
+            /* head of the avail list */        
+            ts_coev_bunch.avail = rv->cb_next;
+        _fm.coevs_free --;        
+    }
+    
+    /* add to the head of the busy list */
+    if (ts_coev_bunch.busy) {
+        assert (ts_coev_bunch.busy->cb_prev == NULL);
+        ts_coev_bunch.busy->cb_prev = rv;
+    }
+    
+    rv->cb_prev = NULL;
+    rv->cb_next = ts_coev_bunch.busy;
+    ts_coev_bunch.busy = rv;
+    
+    _fm.coevs_used ++;
+
     return rv;
 }
+
 static void
-_return_a_stack(coevst_t *sp) {
-    free(sp);
-}
-static void
-_free_stacks(void) { }
+_return_a_coev(coev_t *sp) {
+    
+    /* 1. remove from busy list */
+    if (sp->cb_prev)
+        sp->cb_prev->cb_next = sp->cb_next;
+    if (sp->cb_next)
+        sp->cb_next->cb_prev = sp->cb_prev;
+    if (sp == ts_coev_bunch.busy) {
+        ts_coev_bunch.busy = sp->cb_next;
+        if (ts_coev_bunch.busy)
+            ts_coev_bunch.busy->cb_prev = NULL;
+    }
+
+#ifdef I_AM_NOT_PARANOID
+    sp->state = CSTATE_ZERO;
+    sp->status = CSW_NONE;
+#else
+    memset(sp, 0, sizeof(coev_t));
 #endif
+    
+    /* 2. add to avail list */
+    sp->cb_prev = NULL; /* not used in avail list */
+    
+    sp->cb_next = ts_coev_bunch.avail;
+    ts_coev_bunch.avail = sp;
+    
+    _fm.coevs_free ++;
+    _fm.coevs_used --;
+}
+
+static void
+_free_coevs(void) {
+    coev_t *spa, *spb, *span, *spbn;
+    spa = ts_coev_bunch.avail;
+    spb = ts_coev_bunch.busy;
+    while (spa || spb) {
+        if (spa)
+            span = spa->cb_next;
+        if (spb)
+            spbn = spb->cb_next;
+        if (spa)
+            free(spa);
+        if (spb)
+            free(spb);
+        
+        spa = span;
+        spb = spbn;
+    }
+    /* after this point all pointers to coev_t-s are totally invalid. */
+    _fm.coevs_free = 0;
+    _fm.coevs_used = 0;
+}
+
+/* end of coev_t allocator */
 
 static void update_treepos(coev_t *);
 static void sleep_callback(struct ev_loop *, ev_timer *, int );
@@ -291,8 +382,8 @@ coev_init_root(coev_t *root) {
     root->stack = NULL;
     root->state = CSTATE_CURRENT;
     root->status = CSW_NONE;
-    root->next = NULL;
-    root->ran_out_of_order = 0;
+    root->rq_next = NULL;
+    root->child_count = 0;
     
     ev_timer_init(&root->io_timer, iotimeout_callback, 23., 42.);
     ev_timer_init(&root->sleep_timer, sleep_callback, 23., 42.);
@@ -307,22 +398,22 @@ coev_init_root(coev_t *root) {
 /** universal runner */
 static void coev_initialstub(void);
 
-/** initialize coev_t structure.
+/** return a ready-to-run coroutine
 Note: stack is allocated using anonymous mmap, so be generous, it won't
 eat physical memory until needed */
-void
-coev_init(coev_t *child, coev_runner_t runner, size_t stacksize) {
+coev_t *
+coev_new(coev_runner_t runner, size_t stacksize) {
     coevst_t *sp;
-
+    coev_t *child;
+    
     if (ts_current == NULL)
         _fm.abort("coev_init(): library not initialized");
     
     if (stacksize < SIGSTKSZ)
         _fm.abort("coev_init(): stack size too small (less than SIGSTKSZ)");
 
+    child = _get_a_coev();
     sp = _get_a_stack(stacksize);
-
-    memset(child, 0, sizeof(coev_t));
     
     if (getcontext(&child->ctx))
 	_fm.eabort("coev_init(): getcontext() failed", errno);
@@ -336,28 +427,20 @@ coev_init(coev_t *child, coev_runner_t runner, size_t stacksize) {
     makecontext(&child->ctx, coev_initialstub, 0);
     
     child->id = ts_count++;
+    
     child->parent = (coev_t*)ts_current;
+    ts_current->child_count ++;
+    
     update_treepos(child);
     child->run = runner;
     child->state = CSTATE_RUNNABLE;
     child->status = CSW_NONE;
-    child->next = NULL;
-    child->ran_out_of_order = 0;
+    child->rq_next = NULL;
     
     ev_timer_init(&child->io_timer, iotimeout_callback, 23., 42.);
     ev_timer_init(&child->sleep_timer, sleep_callback, 23., 42.);
-}
-
-static void cls_keychain_fini(cokeychain_t *);
-
-void
-coev_fini(coev_t *corpse) {
-    if (corpse->stack)
-        _return_a_stack(corpse->stack);
-    if (corpse->treepos)
-	_fm.free(corpse->treepos);
-    if (corpse->kc.next)
-        cls_keychain_fini(corpse->kc.next);
+    
+    return child;
 }
 
 #define MAX_CHARS_PER_LEVEL 12
@@ -544,6 +627,29 @@ coev_stop_watchers(coev_t *subject) {
     
 }
 
+static void cls_keychain_fini(cokeychain_t *);
+
+/* goes and releases all dead up the ancestor chain.
+   returns first unreleasable ancestor. NULL on total fail. */
+static coev_t *
+_coev_sweep(coev_t *suspect) {
+    coev_t *parent;
+    coev_dprintf("_coev_sweep(): starting at [%s] %s\n", suspect->treepos, str_coev_state[suspect->state]);
+    while (suspect != NULL) {
+        if ((suspect->child_count > 0) || (suspect->state != CSTATE_DEAD))
+            return suspect;
+        
+        parent = suspect->parent;
+        _return_a_stack(suspect->stack);
+        cls_keychain_fini(suspect->kc.next);
+        _return_a_coev(suspect);
+        parent->child_count --;
+        suspect = parent;
+    }
+    coev_dprintf("_coev_sweep(): oops, no one's alive here.");
+    return NULL;
+}
+
 /** the first and last function that runs in the coroutine */
 static void 
 coev_initialstub(void) {
@@ -555,26 +661,27 @@ coev_initialstub(void) {
     /* clean up any scheduler stuff */
     coev_stop_watchers(self);
     
+    /* die */
     self->state = CSTATE_DEAD;
     
-    /* perform explicit switch to parent */
-    parent = self->parent;
+    /* release resources */
+    parent = _coev_sweep(self);
     
     /* find switchable target by ignoring dead and busy coroutines */
-    while (   (parent != NULL)
-           && (parent->state != CSTATE_RUNNABLE)
-           && (parent->state != CSTATE_SCHEDULED) )
+    while (    (parent != NULL)
+            && (parent->state != CSTATE_RUNNABLE)
+            && (parent->state != CSTATE_SCHEDULED) )
         parent = parent->parent;
 
     if (!parent) {
         if (ts_scheduler.scheduler && (ts_scheduler.scheduler->state == CSTATE_RUNNABLE) )
+            /* here if scheduler is in another branch AND root is not RUNNABLE/SCHEDULED. */
             parent = ts_scheduler.scheduler;
         else
             _fm.abort("coev_initialstub(): absolutely no one to cede control to.");
     }
     
     /* that's it. */
-
     if (parent->state == CSTATE_SCHEDULED)
         coev_runq_remove(parent);
     
@@ -603,25 +710,25 @@ coev_runq_remove(coev_t *subject) {
     coev_t *t = ts_scheduler.runq_head;
     
     if ( ts_scheduler.runq_head == subject ) {
-	ts_scheduler.runq_head = subject->next;
+	ts_scheduler.runq_head = subject->rq_next;
 	return;
     }
     
     while (t) {
-        if (t->next == subject) {
-            t->next = subject->next;
+        if (t->rq_next == subject) {
+            t->rq_next = subject->rq_next;
             return;
         }
-        t = t->next;
+        t = t->rq_next;
     }
 }
 
 static int
 coev_runq_append(coev_t *waiter) {
-    waiter->next = NULL;
+    waiter->rq_next = NULL;
     
     if (ts_scheduler.runq_tail != NULL)
-	ts_scheduler.runq_tail->next = waiter;
+	ts_scheduler.runq_tail->rq_next = waiter;
     
     ts_scheduler.runq_tail = waiter;    
 	
@@ -642,9 +749,9 @@ dump_runqueue(const char *header) {
     while (next) {
         coev_dprintf("    <%p> [%s] %s %s\n", next, next->treepos,
             str_coev_state[next->state], str_coev_status[next->status] );
-        if (next == next->next)
+        if (next == next->rq_next)
             _fm.abort("dump_runqueue(): runqueue loop detected");
-        next = next->next;
+        next = next->rq_next;
     }
 }
 
@@ -884,16 +991,11 @@ coev_loop(void) {
         coev_dprintf("coev_loop(): running the queue.\n");
         
 	while ((target = runq_head)) {
-            coev_dprintf("coev_loop(): runqueue run: target %p head %p next %p\n", target, runq_head, target->next);
-	    runq_head = target->next;
+            coev_dprintf("coev_loop(): runqueue run: target %p head %p next %p\n", target, runq_head, target->rq_next);
+	    runq_head = target->rq_next;
             if (runq_head == target)
                 _fm.abort("coev_loop(): runqueue loop detected");
-	    target->next = NULL;
-            if (target->ran_out_of_order) {
-                target->ran_out_of_order = 0;
-                coev_dprintf("coev_loop(): target [%s] ran out of order: skipping.\n", target->treepos);
-                continue;
-            }
+	    target->rq_next = NULL;
             
             if ((target->state != CSTATE_RUNNABLE) && (target->state != CSTATE_SCHEDULED)) {
                 coev_dprintf("coev_scheduler(): [%s] is %s, skipping.\n",
@@ -1613,12 +1715,27 @@ coev_send(int fd, const void *data, ssize_t len, ssize_t *rv, double timeout) {
     return to_write == 0 ? 0 : -1;
 }
 
+const char const *coev_stat_names[] = {
+    "switches",
+    "waits",
+    "sleeps",
+    "stacks.free",
+    "stacks.used",
+    "coevs.free",
+    "coevs.used",
+    "coevs.dead",
+};
+
 void
-coev_getstats(uint64_t *sw, uint64_t *wa, uint64_t *sl, uint64_t *bc) {
-    *sw = _fm.c_switches;
-    *wa = _fm.c_waits;
-    *sl = _fm.c_sleeps;
-    *bc = _fm.c_bytes_copied;
+coev_getstats(uint64_t *ptr) {
+    ptr[0] = _fm.c_switches;
+    ptr[1] = _fm.c_waits;
+    ptr[2] = _fm.c_sleeps;
+    ptr[3] = _fm.stacks_free;
+    ptr[4] = _fm.stacks_used;
+    ptr[5] = _fm.coevs_free;
+    ptr[6] = _fm.coevs_used;
+    ptr[7] = _fm.coevs_dead;
 }
 
 void
@@ -1630,10 +1747,20 @@ int
 coev_setparent(coev_t *target, coev_t *newparent) {
     coev_t *p;
     
-    for (p = newparent; p; p = p->next)
-	if ( p == target )
-	    return -1;
+    if (newparent->state == CSTATE_ZERO)
+        /* wrong trousers */
+        return -1;
+    
+    p = _coev_sweep(newparent);
 
+    if (!p)
+        _fm.abort("everyone's dead, how come?");
+    
+    target->parent->child_count --;
+    
+    _coev_sweep(target->parent);
+    
+    newparent->child_count ++;
     target->parent = newparent;
     update_treepos(target);
     return 0;
@@ -1650,9 +1777,13 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     memcpy(&_fm, (void *)fm, sizeof(coev_frameth_t));
     
     _fm.c_switches = 0;
-    _fm.c_bytes_copied = 0;
     _fm.c_waits = 0;
     _fm.c_sleeps = 0;
+    _fm.stacks_free = 0;
+    _fm.stacks_used = 0;
+    _fm.coevs_free = 0;
+    _fm.coevs_used = 0;
+    _fm.coevs_dead = 0; /* active = used - dead */
     
     ts_scheduler.loop = ev_default_loop(0);
     ts_scheduler.scheduler = NULL;
@@ -1672,6 +1803,7 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     colock_bunch_init(&ts_rootlockbunch);
     
     memset(&ts_stack_bunch, 0, sizeof(struct _coev_stack_bunch));
+    memset(&ts_coev_bunch, 0, sizeof(struct _coev_t_bunch));
     
     coev_init_root(root);
 }
@@ -1685,5 +1817,6 @@ coev_libfini(void) {
     colock_bunch_fini(ts_rootlockbunch);
     cls_keychain_fini(ts_current->kc.next);
     _free_stacks(); /* this effectively kills all coroutines, unbeknowst to them. */
+    _free_coevs(); /* yep. worse than the above. */
 }
 
