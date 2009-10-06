@@ -29,6 +29,8 @@
 #include <Python.h>
 #include <string.h>
 
+/* #include "modcoev.h" */
+
 #define PSYCOPG_MODULE
 #include "psycoev/config.h"
 #include "psycoev/python.h"
@@ -40,7 +42,6 @@
 #include "psycoev/pgtypes.h"
 #include "psycoev/pgversion.h"
 
-#include "coev.h"
 
 /* query/response handling interface on top of coev. */
 /* old cruft, v2 proto and threading support dumped. */
@@ -51,14 +52,28 @@
 #error postgres >=7.4, protocol >=3 are required.
 #endif
 
+
+static int pq_raise_from_conn(PGconn *pgconn);
+
 /**** building blocks ****/
 
-#include "coev.h"
+#include "ucoev.h"
 
-/* connection flusher */
+/* raises appropriate exception and always returns -1 */ 
+static int
+pqp_raise_from_coev(void) {
+    switch (coev_current()->status) {
+        case CSW_TIMEOUT:
+            PyErr_SetString(Error, "I/O Timeout");
+        default:
+            PyErr_SetString(Error, "Unexpected status after coev_wait()");
+    }
+    return -1;
+}
+
+/* connection flusher, raises appropriate exceptions. */
 static int
 pqp_flush(PGconn *conn, double pg_io_timeout) {
-    coerv_t crv;
     int fd = PQsocket(conn);
     
     while (1) {
@@ -68,32 +83,35 @@ pqp_flush(PGconn *conn, double pg_io_timeout) {
 		return 0;
 	    case -1:
 		/* fail */
-		return -1;
+		return pq_raise_from_conn(conn);
 	    case 1:
-		crv = coev_wait(fd, COEV_WRITE, pg_io_timeout);
+                Py_BEGIN_ALLOW_THREADS
+		coev_wait(fd, COEV_WRITE, pg_io_timeout);
+                Py_END_ALLOW_THREADS
 		break;
 	    default:
 		/* insanity */
 		return -1;
 	}
-        if (crv.status != COERV_EVENT)
-            return -1;
+        if (coev_current()->status != CSW_EVENT)
+            return pqp_raise_from_coev();
     }
 }
 
 /* result reader */
 static int
 pqp_consume_input(PGconn *conn, double pg_io_timeout) {
-    coerv_t crv;
     int fd = PQsocket(conn);
     while(PQisBusy(conn) == 1) {
-	crv = coev_wait(fd, COEV_READ, pg_io_timeout);
-        if (crv.status != COERV_EVENT)
-            return -1;        
+        Py_BEGIN_ALLOW_THREADS
+	coev_wait(fd, COEV_READ, pg_io_timeout);
+        Py_END_ALLOW_THREADS
+        if (coev_current()->status != CSW_EVENT)
+            return pqp_raise_from_coev();
 	if (PQconsumeInput(conn) != 1)
 	    /* some fail. PQconsumeInput()
                returns 0 at fail, 1 otherwise */
-	    return -1; 
+	    return pq_raise_from_conn(conn); 
     }
     return 0;
 }
@@ -103,7 +121,6 @@ pqp_connect(const char *conninfo, double pg_io_timeout) {
     PGconn *conn;
     ConnStatusType status;
     int fd;
-    coerv_t crv;
     
     conn = PQconnectStart(conninfo);
     if (conn == NULL) {
@@ -120,10 +137,14 @@ pqp_connect(const char *conninfo, double pg_io_timeout) {
     while(1) {
 	switch (PQconnectPoll(conn)) {
 	    case PGRES_POLLING_READING:
-		crv = coev_wait(fd, COEV_READ, pg_io_timeout);
+                Py_BEGIN_ALLOW_THREADS
+		coev_wait(fd, COEV_READ, pg_io_timeout);
+                Py_END_ALLOW_THREADS
 		break;
 	    case PGRES_POLLING_WRITING:
-		crv = coev_wait(fd, COEV_WRITE, pg_io_timeout);
+                Py_BEGIN_ALLOW_THREADS
+		coev_wait(fd, COEV_WRITE, pg_io_timeout);
+                Py_END_ALLOW_THREADS
 		break;
 	    case PGRES_POLLING_OK:
 		return conn;
@@ -135,7 +156,7 @@ pqp_connect(const char *conninfo, double pg_io_timeout) {
 		/* some crazy return status */
 		return NULL;
 	}
-        if (crv.status == COERV_EVENT)
+        if (coev_current()->status == CSW_EVENT)
             continue;
         /* timeout or something */
         PQfinish(conn);
@@ -146,38 +167,68 @@ pqp_connect(const char *conninfo, double pg_io_timeout) {
 static int
 pqp_putcopyend(PGconn *conn, const char *errormsg, double pg_io_timeout) {
     int rv, fd;
-    coerv_t crv;
     
     fd = PQsocket(conn);
     while (1) {
         rv = PQputCopyEnd(conn, errormsg);
-        if (rv)
-            return rv; /* 1 or -1, who cares */
-        crv = coev_wait(fd, COEV_WRITE, pg_io_timeout);
-        if (crv.status != COERV_EVENT)
+        if (rv == -1)
             return -1;
+        if (rv == 1)
+            return 0;
+        
+        Py_BEGIN_ALLOW_THREADS
+        coev_wait(fd, COEV_WRITE, pg_io_timeout);
+        Py_END_ALLOW_THREADS
+        if (coev_current()->status != CSW_EVENT)
+            return pqp_raise_from_coev();
     }
 }
 
 static int
-pqp_dropcopydata(PGconn *conn, double pg_io_timeout) {
-    char *buf;
-    int fd, rv;
-    coerv_t crv;
+pqp_putcopydata(PGconn *conn, const char *data, int len, double pg_io_timeout) {
+    int rv, fd;
     
     fd = PQsocket(conn);
     while (1) {
+        rv = PQputCopyData(conn, data, len);
+        if (rv == -1)
+            return pq_raise_from_conn(conn);
+        if (rv == 1)
+            return 0;
+        
+        Py_BEGIN_ALLOW_THREADS
+        coev_wait(fd, COEV_WRITE, pg_io_timeout);
+        Py_END_ALLOW_THREADS
+        if (coev_current()->status != CSW_EVENT)
+            return pqp_raise_from_coev();
+    }
+}
+
+
+/* if **buffer is null, data is dropped mercilessly. */
+static int
+pqp_getcopydata(PGconn *conn, char **buffer, double pg_io_timeout) {
+    char *buf;
+    int rv; 
+    
+    while (1) {
         rv = PQgetCopyData(conn, &buf, 1);
-        if (rv > 0) {
+        if (rv > 0) { /* got some, drop&continue */
+            if (buffer) {
+                *buffer = buf;
+                return 0;
+            }
             PQfreemem(buf);
             continue;
         }
-        if (rv == -1)
+        if (rv == -1) /* copy is done, result is handled in caller. */
             return 0;
-        if (rv == -2)
-            return -1;
-        crv = coev_wait(fd, COEV_READ, pg_io_timeout);
-        if (crv.status != COERV_EVENT)
+        
+        if (rv == -2) /* PQ error */
+            return pq_raise_from_conn(conn);
+        
+        rv = pqp_consume_input(conn, pg_io_timeout);
+        if (rv == -1)
             return -1;
     }
 }
@@ -200,7 +251,7 @@ pqp_discard_results(PGconn *conn, double pg_io_timeout) {
         if (status == PGRES_COPY_IN)
             rv = pqp_putcopyend(conn, "pqp_discard_results()", pg_io_timeout);
         else if (status == PGRES_COPY_OUT)
-            rv = pqp_dropcopydata(conn, pg_io_timeout);
+            rv = pqp_getcopydata(conn, NULL, pg_io_timeout);
         if (rv < 0)
             return -1;
     }
@@ -220,9 +271,11 @@ pqp_exec(PGconn *conn, const char *command, double pg_io_timeout) {
     if (pqp_discard_results(conn, pg_io_timeout)) 
         return NULL;
     
-    if (!PQsendQuery(conn, command))
+    if (!PQsendQuery(conn, command)) {
 	/* dispatch fail */
+        pq_raise_from_conn(conn);
 	return NULL;
+    }
     
     /* flush data to server */
     if (pqp_flush(conn, pg_io_timeout)) 
@@ -411,7 +464,7 @@ pq_raise(connectionObject *conn, cursorObject *curs, PGresult *pgres)
     psyco_set_error(exc, pgc, err2, err, code);
 }
 
-static void
+static int
 pq_raise_from_result(PGresult *pgres) {
     const char *err, *err2, *code;
     PyObject *exc = NULL;
@@ -425,7 +478,7 @@ pq_raise_from_result(PGresult *pgres) {
     } else {
         Dprintf("pq_raise_from_result: no error message for result structute with error status");
         PyErr_SetString(Error, "no error message for result structute with error status");
-        return;
+        return -1;
     }
     
     /* if exc is still NULL psycoev was not built with HAVE_PQPROTOCOL3 or the
@@ -451,9 +504,11 @@ pq_raise_from_result(PGresult *pgres) {
     /* try to remove the initial "ERROR: " part from the postgresql error */
     err2 = strip_severity(err);
     psyco_set_error(exc, NULL, err2, err, code);
+    return -1;
 }
 
-static void
+/* sets an exception and always returns -1 */
+static int
 pq_raise_from_conn(PGconn *pgconn) {
     const char *err, *err2;
     PyObject *exc;
@@ -461,7 +516,7 @@ pq_raise_from_conn(PGconn *pgconn) {
     err = PQerrorMessage(pgconn);
     if (!err) {
         PyErr_SetString(Error, "no error message for CONNECTION_BAD connection");
-        return;
+        return -1;
     }
     
     if (!strncmp(err, "ERROR:  Cannot insert a duplicate key", 37)
@@ -482,14 +537,17 @@ pq_raise_from_conn(PGconn *pgconn) {
     /* try to remove the initial "ERROR: " part from the postgresql error */
     err2 = strip_severity(err);
     psyco_set_error(exc, NULL, err2, err, NULL);
-
+    return -1;
 }
 
 /** pq_check_result - check supplied connection and result.
     clear the result and raise appropriate exception 
     if something's fishy.
 
-    returns nonzero iff an exception was raised.    
+    returns:
+            0 if all is ok.
+           -1 iff an exception was raised.
+
 */
 
 int
@@ -498,9 +556,9 @@ pq_check_result(PGconn *pgconn, PGresult *pgres) {
         switch(PQresultStatus(pgres)) {
             case PGRES_BAD_RESPONSE:
             case PGRES_FATAL_ERROR:
-                PQclear(pgres);
                 pq_raise_from_result(pgres);
-                return 1;
+                PQclear(pgres);
+                return -1;
             case PGRES_NONFATAL_ERROR:
                 /* maybe warn or something */
             default:
@@ -509,89 +567,17 @@ pq_check_result(PGconn *pgconn, PGresult *pgres) {
     }
     if (pgconn) {
         /* check connection just in case */
-        if (PQstatus(pgconn) != CONNECTION_OK) {
-            
-            pq_raise_from_conn(pgconn);
-            return 1;
-        }
+        if (PQstatus(pgconn) != CONNECTION_OK)
+            return pq_raise_from_conn(pgconn);
+
         Dprintf("pq_check_result: OK.");
         return 0;
     }
     
     /* epic fail */
     PyErr_SetString(ProgrammingError, "pq_check_result called with nulls");
-    return 1;
-}
-
-/* pq_set_critical, pq_resolve_critical - manage critical errors
-
-   this function is invoked when a PQexec() call returns NULL, meaning a
-   critical condition like out of memory or lost connection. it save the error
-   message and mark the connection as 'wanting cleanup'.
-
-   both functions do not call any Py_*_ALLOW_THREADS macros.
-   pq_resolve_critical should be called while holding the GIL. */
-#if 0
-static void
-pq_set_critical(connectionObject *conn, const char *msg)
-{
-    if (msg == NULL)
-        msg = PQerrorMessage(conn->pgconn);
-    if (conn->critical) free(conn->critical);
-    Dprintf("pq_set_critical: setting %s", msg);
-    if (msg && msg[0] != '\0') conn->critical = strdup(msg);
-    else conn->critical = NULL;
-}
-#endif
-
-static void
-pq_clear_critical(connectionObject *conn)
-{
-    /* sometimes we know that the notice analizer set a critical that
-       was not really as such (like when raising an error for a delayed
-       contraint violation. it would be better to analyze the notice
-       or avoid the set-error-on-notice stuff at all but given that we
-       can't, some functions at least clear the critical status after
-       operations they know would result in a wrong critical to be set */
-    Dprintf("pq_clear_critical: clearing %s", conn->critical);
-    if (conn->critical) {
-        free(conn->critical);
-        conn->critical = NULL;
-    }
-}
-
-static PyObject *
-pq_resolve_critical(connectionObject *conn, int close)
-{
-    Dprintf("pq_resolve_critical: resolving %s", conn->critical);
-
-    if (conn->critical) {
-        char *msg = &(conn->critical[6]);
-        Dprintf("pq_resolve_critical: error = %s", msg);
-        /* we can't use pq_raise because the error has already been cleared
-           from the connection, so we just raise an OperationalError with the
-           critical message */
-        PyErr_SetString(OperationalError, msg);
-
-        /* we don't want to destroy this connection but just close it */
-        if (close == 1) conn_close(conn);
-    
-        /* remember to clear the critical! */
-        pq_clear_critical(conn);    
-    }
-    return NULL;
-}
-
-/* stubs for lobject_int.c */
-int 
-pq_begin_locked(connectionObject *conn, PGresult **pgres, char **error) {
     return -1;
 }
-void 
-pq_complete_error(connectionObject *conn, PGresult **pgres, char **error) {
-    return;
-}
-
 
 /*  pq_begin  - begin a transaction.
     sets up an exception and  returns -1 on error
@@ -599,7 +585,7 @@ pq_complete_error(connectionObject *conn, PGresult **pgres, char **error) {
     no cleanup necessary.
 */
 int
-pq_begin(connectionObject *conn, double pg_io_timeout) {
+pq_begin(connectionObject *conn) {
     PGresult *pgres;
     
     const char *query[] = {
@@ -610,13 +596,14 @@ pq_begin(connectionObject *conn, double pg_io_timeout) {
     Dprintf("pq_begin: pgconn = %p, isolevel = %ld, status = %d",
             conn->pgconn, conn->isolation_level, conn->status);
 
-    if (conn->isolation_level == 0 || conn->status != CONN_STATUS_READY) {
+    if (    (conn->isolation_level == 0)
+         || (conn->status != CONN_STATUS_READY)) {
         Dprintf("pq_begin: transaction in progress");
         return 0;
     }
 
-    pgres = pqp_exec(conn->pgconn, query[conn->isolation_level], pg_io_timeout);
-    if (pq_check_result(conn->pgconn, pgres))
+    pgres = pqp_exec(conn->pgconn, query[conn->isolation_level], conn->pg_io_timeout);
+    if (pq_check_result(conn->pgconn, pgres) == -1)
         return -1;
 
     PQclear(pgres);
@@ -624,37 +611,35 @@ pq_begin(connectionObject *conn, double pg_io_timeout) {
     return 0;
 }
 
-/* pq_commit - send an END, if necessary
-
-   This function should be called while holding the global interpreter
-   lock. */
+/* pq_commit - send an END, if necessary */
 
 int
-pq_commit(connectionObject *conn, double pg_io_timeout)
+pq_commit(connectionObject *conn)
 {
     PGresult *pgres;
 
     Dprintf("pq_commit: pgconn = %p, isolevel = %ld, status = %d",
             conn->pgconn, conn->isolation_level, conn->status);
 
-    if (conn->isolation_level == 0 || conn->status != CONN_STATUS_BEGIN) {
+    if (    (conn->isolation_level == 0) 
+         || (conn->status != CONN_STATUS_BEGIN)) {
         Dprintf("pq_commit: no transaction to commit");
         return 0;
     }
 
     conn->mark += 1;
 
-    pgres = pqp_exec(conn->pgconn, "COMMIT", pg_io_timeout);
+    pgres = pqp_exec(conn->pgconn, "COMMIT", conn->pg_io_timeout);
         
     /* Even if an error occurred, the connection will be rolled back,
        so we unconditionally set the connection status here. */
     conn->status = CONN_STATUS_READY;
 
-    if (pq_check_result(conn->pgconn, pgres))
-        return 0;
+    if (pq_check_result(conn->pgconn, pgres) == -1)
+        return -1;
     
     PQclear(pgres);
-    return 1;
+    return 0;
 }
 
 int
@@ -665,7 +650,8 @@ pq_abort(connectionObject *conn)
     Dprintf("pq_abort: pgconn = %p, isolevel = %ld, status = %d",
             conn->pgconn, conn->isolation_level, conn->status);
 
-    if (conn->isolation_level == 0 || conn->status != CONN_STATUS_BEGIN) {
+    if (    (conn->isolation_level == 0) 
+         || (conn->status != CONN_STATUS_BEGIN)) {
         Dprintf("pq_abort_locked: no transaction to abort");
         return 0;
     }
@@ -674,18 +660,18 @@ pq_abort(connectionObject *conn)
     
     pgres = pqp_exec(conn->pgconn, "ROLLBACK", conn->pg_io_timeout);
     if (pq_check_result(conn->pgconn, pgres))
-        return 0;
+        return -1;
     
     conn->status = CONN_STATUS_READY;
 
     PQclear(pgres);
-    return 1;
+    return 0;
 }
 
 
-static void *
-pq_close_runner(coev_t *c, void *p) {
-    connectionObject *conn = (connectionObject *)p;
+static void
+pq_close_runner(coev_t *c) {
+    connectionObject *conn = (connectionObject *)(c->A);
     
     /* execute a forced rollback on the connection (but don't check the
        result, we're going to close the pq connection anyway */
@@ -696,27 +682,43 @@ pq_close_runner(coev_t *c, void *p) {
         PQfinish(conn->pgconn);
         Dprintf("pq_close_runner: PQfinish called");
         conn->pgconn = NULL;
-   }
-   return NULL;
+    }
+    Dprintf("pq_close_runner: finished.");
 }
 
-/* create a coroutine to perform the disconnection 
-   in case the scheduler stopped in we're 
-   formally in scheduler coroutine, 
-   so waits would abort  */
+/* create a coroutine to perform the cleanup on connection */
+/* problem is, if there is no scheduler, we must not do 
+   Py_BEGIN_ALLOW_THREADS/Py_END_ALLOW_THREADS because pq_abort's pqp_exec
+   will do this for us. */
 void 
 pq_close(connectionObject *conn) {
     coev_t *closer = PyMem_Malloc(sizeof(coev_t));
-    coerv_t rv;
+    coev_t *sched;
     
     if (closer == NULL)
         Py_FatalError("pq_close(): no memory (psycoev)");
     
-    coev_init(closer, &pq_close_runner);
-    rv = coev_switch(closer, (void *)conn);
-    if (rv.status == COERV_SCHEDULER_NEEDED)
-        coev_loop(0);
-            
+    coev_init(closer, &pq_close_runner, 8*4096);
+    closer->A = conn;
+    coev_schedule(closer);
+    
+    sched = coev_loop();
+    
+    if (sched != NULL) {
+        Py_BEGIN_ALLOW_THREADS        
+        if (coev_stall() == CSCHED_NOSCHEDULER) {
+            Dprintf("pq_close: CSCHED_NOSCHEDULER from coev_stall(), but coev_loop() returned [%s]", sched->treepos);
+            Py_FatalError("pq_close: unpossible contradiction in scheduler existence.");
+        }
+        Dprintf("pq_close: control is back from coev_stall(), doing Py_END_ALLOW_THREADS.");
+        Py_END_ALLOW_THREADS
+    }
+    
+    if (closer->state != CSTATE_DEAD)
+        /* this is suprising */
+        Py_FatalError("pq_close(): closer coroutine not dead: now what?");
+    
+    coev_fini(closer);
     PyMem_Free(closer);
 }
 
@@ -739,19 +741,17 @@ pq_is_busy(connectionObject *conn)
 
     Dprintf("pq_is_busy: consuming input");
 
-
     if (PQconsumeInput(conn->pgconn) == 0) {
         Dprintf("pq_is_busy: PQconsumeInput() failed");
         PyErr_SetString(OperationalError, PQerrorMessage(conn->pgconn));
         return -1;
     }
 
-
     /* now check for notifies */
     while ((pgn = PQnotifies(conn->pgconn)) != NULL) {
         PyObject *notify;
 
-        Dprintf("curs_is_busy: got NOTIFY from pid %d, msg = %s",
+        Dprintf("pq_is_busy: got NOTIFY from pid %d, msg = %s",
                 (int) pgn->be_pid, pgn->relname);
 
         notify = PyTuple_New(2);
@@ -762,7 +762,6 @@ pq_is_busy(connectionObject *conn)
     }
 
     res = PQisBusy(conn->pgconn);
-    
     return res;
 }
 
@@ -773,16 +772,8 @@ pq_is_busy(connectionObject *conn)
 
     used only in cursor_type.c */
 int
-pq_execute(cursorObject *curs, const char *query, int async)
+pq_execute(cursorObject *curs, const char *query)
 {
-    /* if the status of the connection is critical raise an exception and
-       definitely close the connection */
-    if (curs->conn->critical) {
-        Dprintf("pq_execute: connection critical");
-        pq_resolve_critical(curs->conn, 1);
-        return -1;
-    }
-
     /* check status of connection, raise error if not OK */
     if (PQstatus(curs->conn->pgconn) != CONNECTION_OK) {
         Dprintf("pq_execute: connection NOT OK");
@@ -795,14 +786,7 @@ pq_execute(cursorObject *curs, const char *query, int async)
         PQstatus(curs->conn->pgconn)
     );
 
-    if (async) {
-        /* fail: async mode is not supported. */
-        Dprintf("pq_execute: async mode not supported.");
-        PyErr_SetString(OperationalError, "Async mode not supported");
-        return -1;
-    }
-    
-    if (pq_begin(curs->conn, curs->conn->pg_io_timeout) == -1)
+    if (pq_begin(curs->conn) == -1)
         return -1;
 
     curs->pgres = pqp_exec(curs->conn->pgconn, query, curs->conn->pg_io_timeout);
@@ -974,64 +958,69 @@ _pq_copy_in_v3(cursorObject *curs)
         if (!o || !PyString_Check(o) || (length = PyString_Size(o)) == -1) {
             error = 1;
         }
-        if (length == 0 || length > INT_MAX || error == 1) break;
+        if (length == 0 || length > INT_MAX || error == 1) {
+            /* .read() error */
+            break;
+        }
 
-        Py_BEGIN_ALLOW_THREADS;
-        res = PQputCopyData(curs->conn->pgconn, PyString_AS_STRING(o),
-            /* Py_ssize_t->int cast was validated above */
-            (int) length);
+        /* FIXME: ugly Py_ssize_t->int cast */
+        res = pqp_putcopydata(curs->conn->pgconn, 
+            PyString_AS_STRING(o), (int) length, curs->conn->pg_io_timeout);
         Dprintf("_pq_copy_in_v3: sent %d bytes of data; res = %d",
             (int) length, res);
-            
-        if (res == 0) {
-            /* FIXME: in theory this should not happen but adding a check
-               here would be a nice idea */
-        }
-        else if (res == -1) {
-            Dprintf("_pq_copy_in_v3: PQerrorMessage = %s",
-                PQerrorMessage(curs->conn->pgconn));
-            error = 2;
-        }
-        Py_END_ALLOW_THREADS;
-
-        if (error == 2) break;
 
         Py_DECREF(o);
+        
+        if (res == -1) {
+            /* backend error */
+            error = 2;
+            break;
+        }
     }
-
-    Py_XDECREF(o);
 
     Dprintf("_pq_copy_in_v3: error = %d", error);
 
     /* 0 means that the copy went well, 2 that there was an error on the
        backend: in both cases we'll get the error message from the PQresult */
-    if (error == 0)
-        res = PQputCopyEnd(curs->conn->pgconn, NULL);
-    else if (error == 2)
-        res = PQputCopyEnd(curs->conn->pgconn, "error in PQputCopyData() call");
-    else
-        res = PQputCopyEnd(curs->conn->pgconn, "error in .read() call");
-
-    IFCLEARPGRES(curs->pgres);
-    
     Dprintf("_pq_copy_in_v3: copy ended; res = %d", res);
-    
-    /* if the result is -1 we should not even try to get a result from the
-       bacause that will lock the current thread forever */
-    if (res == -1) {
-        pq_raise(curs->conn, curs, NULL);
-        /* FIXME: pq_raise check the connection but for some reason even
-           if the error message says "server closed the connection unexpectedly"
-           the status returned by PQstatus is CONNECTION_OK! */
-        curs->conn->closed = 2;
+    IFCLEARPGRES(curs->pgres);
+    switch (error) {
+        case 0:
+            res = pqp_putcopyend(curs->conn->pgconn, NULL, curs->conn->pg_io_timeout);
+            break;
+        case 1:
+            res = pqp_putcopyend(curs->conn->pgconn, "error in .read() call", curs->conn->pg_io_timeout);
+            break;
+        case 2:
+            /* do not try to do anything with connection if the backend already reported an error */
+            curs->conn->closed = 2;
+            return -1;
     }
-    else {
-        /* and finally we grab the operation result from the backend */
-        while ((curs->pgres = PQgetResult(curs->conn->pgconn)) != NULL) {
-            if (PQresultStatus(curs->pgres) == PGRES_FATAL_ERROR)
-                pq_raise(curs->conn, curs, NULL);
-            IFCLEARPGRES(curs->pgres);
-        }
+    
+    /* if the result is -1 exception has already been raised. */
+    if (res == -1) {
+        curs->conn->closed = 2;
+        return -1;
+    }
+    
+    
+    /* and finally we grab the operation result from the backend.
+       this actually kills any result returned, but that's how it was 
+       in the original code. No idea why. */
+    
+    while (1) {
+        res = pqp_consume_input(curs->conn->pgconn, curs->conn->pg_io_timeout);
+        if (res == -1)
+            return -1;
+        
+        curs->pgres = PQgetResult(curs->conn->pgconn);
+        if (curs->pgres == NULL)
+            break;
+        
+        if (pq_check_result(curs->conn->pgconn, curs->pgres) == -1)
+            return -1;
+        
+        IFCLEARPGRES(curs->pgres);
     }
    
     return error == 0 ? 1 : -1;
@@ -1107,10 +1096,8 @@ pq_fetch(cursorObject *curs)
        get something edible to eat */
     if (!curs->pgres) {
         Dprintf("pq_fetch: no data: this cannot be.");
-    }
-
-    if (curs->pgres == NULL) 
         return 0;
+    }
 
     pgstatus = PQresultStatus(curs->pgres);
     Dprintf("pq_fetch: pgstatus = %s", PQresStatus(pgstatus));
@@ -1166,20 +1153,7 @@ pq_fetch(cursorObject *curs)
             break;
     }
 
-    Dprintf("pq_fetch: fetching done; check for critical errors");
-
-    /* error checking, close the connection if necessary (some critical errors
-       are not really critical, like a COPY FROM error: if that's the case we
-       raise the exception but we avoid to close the connection) */
-    if (curs->conn->critical) {
-        if (ex == -1) {
-            pq_resolve_critical(curs->conn, 1);
-        }
-        else {
-            pq_resolve_critical(curs->conn, 0);
-        }
-        return -1;
-    }
+    Dprintf("pq_fetch: fetching done.");
 
     return ex;
 }

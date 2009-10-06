@@ -40,7 +40,8 @@ collect_error(connectionObject *conn, char **error)
     if (msg)
         *error = strdup(msg);
 }
-
+static int pq_begin_locked(void *r0, void *r1, void*r2) { return -1; }
+static void pq_complete_error(void *r0, void *r1, void*r2) { ; }
 /* lobject_open - create a new/open an existing lo */
 
 int

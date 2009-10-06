@@ -194,7 +194,7 @@ class psycoev_build_ext(build_ext):
 
         self.include_dirs.append(".")
         self.libraries.append("pq")
-        self.libraries.append("coev")
+        self.libraries.append("ucoev")
 
         try:
             self.library_dirs.append(self.get_pg_config("libdir"))

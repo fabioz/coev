@@ -59,7 +59,7 @@ psyco_curs_close(cursorObject *self, PyObject *args)
 
         EXC_IF_NO_MARK(self);
         PyOS_snprintf(buffer, 127, "CLOSE %s", self->name);
-        if (pq_execute(self, buffer, 0) == -1) return NULL;
+        if (pq_execute(self, buffer) == -1) return NULL;
     }
 
     self->closed = 1;
@@ -426,7 +426,7 @@ _psyco_curs_execute(cursorObject *self,
 
     /* At this point, the SQL statement must be str, not unicode */
     
-    res = pq_execute(self, PyString_AS_STRING(self->query), async);
+    res = pq_execute(self, PyString_AS_STRING(self->query));
     Dprintf("psyco_curs_execute: res = %d, pgres = %p", res, self->pgres);
     if (res == -1) { goto fail; }
 
@@ -767,7 +767,7 @@ psyco_curs_fetchone(cursorObject *self, PyObject *args)
 
         EXC_IF_NO_MARK(self);
         PyOS_snprintf(buffer, 127, "FETCH FORWARD 1 FROM %s", self->name);
-        if (pq_execute(self, buffer, 0) == -1) return NULL;
+        if (pq_execute(self, buffer) == -1) return NULL;
         if (_psyco_curs_prefetch(self) < 0) return NULL;
     }
 
@@ -828,7 +828,7 @@ psyco_curs_fetchmany(cursorObject *self, PyObject *args, PyObject *kwords)
         EXC_IF_NO_MARK(self);
         PyOS_snprintf(buffer, 127, "FETCH FORWARD %d FROM %s",
             (int)size, self->name);
-        if (pq_execute(self, buffer, 0) == -1) return NULL;
+        if (pq_execute(self, buffer) == -1) return NULL;
         if (_psyco_curs_prefetch(self) < 0) return NULL;
     }
 
@@ -899,7 +899,7 @@ psyco_curs_fetchall(cursorObject *self, PyObject *args)
 
         EXC_IF_NO_MARK(self);
         PyOS_snprintf(buffer, 127, "FETCH FORWARD ALL FROM %s", self->name);
-        if (pq_execute(self, buffer, 0) == -1) return NULL;
+        if (pq_execute(self, buffer) == -1) return NULL;
         if (_psyco_curs_prefetch(self) < 0) return NULL;
     }
 
@@ -1111,7 +1111,7 @@ psyco_curs_scroll(cursorObject *self, PyObject *args, PyObject *kwargs)
         else {
             PyOS_snprintf(buffer, 127, "MOVE %d FROM %s", value, self->name);
         }
-        if (pq_execute(self, buffer, 0) == -1) return NULL;
+        if (pq_execute(self, buffer) == -1) return NULL;
         if (_psyco_curs_prefetch(self) < 0) return NULL;
     }
 
@@ -1267,7 +1267,7 @@ psyco_curs_copy_from(cursorObject *self, PyObject *args, PyObject *kwargs)
     self->copysize = bufsize;
     self->copyfile = file;
 
-    if (pq_execute(self, query, 0) == 1) {
+    if (pq_execute(self, query) == 1) {
         res = Py_None;
         Py_INCREF(Py_None);
     }
@@ -1370,7 +1370,7 @@ psyco_curs_copy_to(cursorObject *self, PyObject *args, PyObject *kwargs)
     self->copysize = 0;
     self->copyfile = file;
 
-    if (pq_execute(self, query, 0) == 1) {
+    if (pq_execute(self, query) == 1) {
         res = Py_None;
         Py_INCREF(Py_None);
     }
@@ -1436,7 +1436,7 @@ psyco_curs_copy_expert(cursorObject *self, PyObject *args, PyObject *kwargs)
     self->copyfile = file;
 
     /* At this point, the SQL statement must be str, not unicode */
-    if (pq_execute(self, PyString_AS_STRING(sql), 0) != 1) { goto fail; }
+    if (pq_execute(self, PyString_AS_STRING(sql)) != 1) { goto fail; }
 
     res = Py_None;
     Py_INCREF(res);

@@ -225,7 +225,7 @@ conn_rollback(connectionObject *self)
 int
 conn_commit(connectionObject *self)
 {
-    return pq_commit(self, self->pg_io_timeout);
+    return pq_commit(self);
 }
 
 /* conn_switch_isolation_level - switch isolation level on the connection */

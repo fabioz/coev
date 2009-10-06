@@ -22,6 +22,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+/* #include "modcoev.h" */
+
 #define PSYCOPG_MODULE
 #include "psycoev/config.h"
 #include "psycoev/python.h"
@@ -826,5 +828,9 @@ init_psycoev(void)
     mxdatetimeType.tp_alloc = PyType_GenericAlloc;
 #endif
 
+/*
+    if (import_coev() < 0)
+        return;
+*/
     Dprintf("initpsycoev: module initialization complete");
 }

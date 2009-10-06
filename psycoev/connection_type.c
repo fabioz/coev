@@ -417,20 +417,22 @@ connection_setup(connectionObject *self, const char *dsn)
         self, ((PyObject *)self)->ob_refcnt
       );
 
-    self->dsn = strdup(dsn);
+    {
+        size_t dsnlen = strlen(dsn) + 1;
+        
+        self->dsn = PyMem_Malloc(dsnlen);
+        memmove(self->dsn, dsn, dsnlen);
+    }
     self->notice_list = PyList_New(0);
     self->notifies = PyList_New(0);
     self->closed = 0;
     self->status = CONN_STATUS_READY;
-    self->critical = NULL;
     self->async_cursor = NULL;
     self->pgconn = NULL;
     self->mark = 0;
     self->string_types = PyDict_New();
     self->binary_types = PyDict_New();
     self->pg_io_timeout = 10.0;
-
-    pthread_mutex_init(&(self->lock), NULL);
 
     if (conn_connect(self) != 0) {
         Dprintf("connection_init: FAILED");
@@ -460,17 +462,16 @@ connection_dealloc(PyObject* obj)
     connectionObject *self = (connectionObject *)obj;
 
     if (self->closed == 0) conn_close(self);
-    if (self->dsn) free(self->dsn);  /* FIXME: memory */
-    if (self->encoding) free(self->encoding);
-    if (self->critical) free(self->critical);
+    if (self->dsn) 
+        PyMem_Free(self->dsn);  
+    if (self->encoding) 
+        PyMem_Free(self->encoding);
 
     Py_CLEAR(self->notice_list);
     Py_CLEAR(self->notifies);
     Py_CLEAR(self->async_cursor);
     Py_CLEAR(self->string_types);
     Py_CLEAR(self->binary_types);
-
-    pthread_mutex_destroy(&(self->lock));
 
     Dprintf("connection_dealloc: deleted connection object at %p, refcnt = "
         FORMAT_CODE_PY_SSIZE_T,

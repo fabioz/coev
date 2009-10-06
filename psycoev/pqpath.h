@@ -32,34 +32,16 @@
 
 /* exported functions */
 
-HIDDEN PGconn *pqp_connect(const char *conn, double pg_io_timeout);
+HIDDEN PGconn *pqp_connect(const char *conninfo, double pg_io_timeout);
 HIDDEN PGresult *pqp_exec(PGconn *conn, const char *command, double pg_io_timeout);
 HIDDEN void pq_close(connectionObject *conn);
 
 HIDDEN int pq_fetch(cursorObject *curs);
-HIDDEN int pq_execute(cursorObject *curs, const char *query, int async);
-#ifndef LOBJECT_PORTED
-HIDDEN int pq_begin_locked(connectionObject *conn, PGresult **pgres,
-                           char **error);
-#endif
-HIDDEN int pq_commit(connectionObject *conn, double pg_io_timeout);
-#if 0
-HIDDEN int pq_abort_locked(connectionObject *conn, PGresult **pgres,
-                           char **error);
-#endif
+HIDDEN int pq_execute(cursorObject *curs, const char *query);
+HIDDEN int pq_commit(connectionObject *conn);
+
 HIDDEN int pq_abort(connectionObject *conn);
 HIDDEN int pq_is_busy(connectionObject *conn);
 
-#if 0
-HIDDEN void pq_set_critical(connectionObject *conn, const char *msg);
-
-HIDDEN int pq_execute_command_locked(connectionObject *conn,
-                                     const char *query,
-                                     PGresult **pgres, char **error);
-#endif
-#ifndef LOBJECT_PORTED
-HIDDEN void pq_complete_error(connectionObject *conn, PGresult **pgres,
-                              char **error);
-#endif
 HIDDEN int pq_check_result(PGconn *pgconn, PGresult *pgres);
 #endif /* !defined(PSYCOPG_PQPATH_H) */

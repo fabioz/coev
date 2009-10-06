@@ -49,7 +49,6 @@ typedef struct {
     pthread_mutex_t lock;   /* the global connection lock */
 
     char *dsn;              /* data source name */
-    char *critical;         /* critical error on this connection */
     char *encoding;         /* current backend encoding */
 
     long int closed;          /* 1 means connection has been closed;
