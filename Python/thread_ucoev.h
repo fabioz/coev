@@ -91,7 +91,9 @@ static size_t _stacksize = 23 * 4096;
  */
 static void
 PyThread__init_thread(void) {
+    tuco_dprintf("PyThread__init_thread(): initialized=%d\n", initialized);
     if (!initialized) {
+        
         coev_libinit(&_cmf, &coev_main);
         initialized = 1;
 	start_time = time(NULL);
@@ -120,12 +122,8 @@ PyThread_start_new_thread(func_t func, void *arg) {
     
     if (!initialized)
         PyThread_init_thread();
-    c = malloc(sizeof(coev_t));
-    if (!c)
-        return -1;
-    memset(c, 0, sizeof(coev_t));
         
-    coev_init( c, _wrapper, _stacksize );
+    c = coev_new( _wrapper, _stacksize );
     c->A = NULL;
     c->X = func;
     c->Y = arg;
