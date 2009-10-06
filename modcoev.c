@@ -214,10 +214,7 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
                 Py_FatalError("CSW_SIGCHLD, but dead_meat->state != CSTATE_DEAD");
             Py_CLEAR(self->A);
             Py_CLEAR(dead_meat->A);
-            coev_fini(dead_meat);
-#ifdef WANNA_DIE_A_HORRIBLE_DEATH
-            free(dead_meat);
-#endif
+
             Py_RETURN_NONE;
             
         case CSW_SCHEDULER_NEEDED:
@@ -594,10 +591,7 @@ mod_wait_bottom_half(void) {
             
             PyErr_Format(PyExc_CoroWaitAbort, "SIGCHLD from [%s] ", coev_treepos(dead_meat));
             Py_CLEAR(dead_meat->A);
-            coev_fini(dead_meat);
-	    if (dead_meat->id)
-		free(dead_meat);
-	    else
+	    if (!dead_meat->id)
 		Py_FatalError("SIGCHLD from root coro: unpossible.");
 	    cur->status = CSW_VOLUNTARY; /* SIGCHLD handled. */
             return NULL;
@@ -754,16 +748,28 @@ Returns a dict of various counters");
 
 static PyObject *
 mod_stats(PyObject *a) {
-    uint64_t sw, wa, sl, bc;
+    PyObject *dick, *val;
+    uint64_t ary[COEV_STAT_COUNT];
+    int i;
     
-    coev_getstats(&sw, &wa, &sl, &bc);
-    return Py_BuildValue("{s:K,s:K,s:K,s:K,s:K,s:K}", 
-        "l.switches",     sw, 
-        "l.waits",        wa, 
-        "l.sleeps",       sl, 
-        "l.bytes_copied", bc, 
-        "m.created",      sw+wa, 
-        "m.destroyed",    sl+bc );
+    coev_getstats(ary);
+    
+    dick = PyDict_New();
+    if (!dick)
+        return dick;
+    
+    for(i=0; i<COEV_STAT_COUNT; i++) {
+        val = Py_BuildValue("K", ary[i]);
+        if (!val) {
+            Py_CLEAR(dick);
+            return NULL;
+        }
+        if ( PyDict_SetItemString(dick, coev_stat_names[i], val) == -1 ) {
+            Py_CLEAR(dick);
+            return NULL;
+        }
+    }
+    return dick;
 }
 
 PyDoc_STRVAR(mod_setdebug_doc,
