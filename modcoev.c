@@ -6,6 +6,10 @@
 
 #include "ucoev.h"
 
+#define COEV_MODULE
+#include "modcoev.h"
+
+
 /** version 0.5 - no explicit coroutine type.
     switch, wait and friends operate on thread-ids.
     
@@ -111,12 +115,6 @@ static struct _exc_def {
         "ask Captain Obvious\n"
     },
     
-#define CSW_TARGET_SELF         11 /* switch to self attempted. */
-#define CSW_TARGET_DEAD         12 /* switch to/scheduling of a dead coroutine attempted  */
-#define CSW_TARGET_BUSY         13 /* switch to/scheduling of a coroutine with active event watcher attempted */
-#define CSCHED_DEADMEAT         1  /* attempt to schedule dead coroutine */
-#define CSCHED_ALREADY          2  /* attempt to schedule already scheduled coroutine */
-#define CSCHED_NOSCHEDULER      3  /* attempt to yield, but no scheduler to switch to (from coev_stall() only) */
     { 0 }
 };
 
@@ -713,16 +711,28 @@ Run scheduler: dispatch pending IO or timer events");
 
 static PyObject *
 mod_scheduler(PyObject *a) {
+    coev_t *sched;
     coro_dprintf("coev.scheduler(): calling coev_loop() (cur=[%s]).\n", 
         coev_current()->treepos);
     Py_BEGIN_ALLOW_THREADS
-    coev_loop();
+    sched = coev_loop();
     Py_END_ALLOW_THREADS    
     
-    /* this returns iff an ev_unloop() has been called. 
-    either with coev_unloop() or in interrupt handler. */
-    coro_dprintf("coev.scheduler(): coev_loop() returned (cur=[%s]).\n", 
-        coev_current()->treepos);
+    /* this returns if: 
+         - an ev_unloop() has been called by coev_unloop() or in interrupt handler. 
+         - there's nothing left to schedule
+         - there already is a scheduler.
+    */
+    if (sched != NULL) {
+        coro_dprintf("coev.scheduler(): [%s] is already scheduling. (cur=[%s]).\n", 
+            sched->treepos, coev_current()->treepos);
+        PyErr_Format(PyExc_CoroError, "coev.scheduler(): [%s] is already scheduling. (cur=[%s])",
+            sched->treepos, coev_current()->treepos);
+        return NULL;
+    }
+        
+    coro_dprintf("coev.scheduler(): coev_loop() returned %p (cur=[%s]).\n", 
+        sched, coev_current()->treepos);
     /* return NULL iff this module set up an exception. */
     if (PyErr_Occurred() != NULL)
         return NULL;
@@ -799,6 +809,8 @@ static PyMethodDef CoevMethods[] = {
 void 
 initcoev(void) {
     PyObject* m;
+    static void *PyCoev_API[PyCoev_API_pointers];
+    PyObject *c_api_object;
 
     m = Py_InitModule("coev", CoevMethods);
     if (m == NULL)
@@ -857,4 +869,15 @@ initcoev(void) {
     
     Py_INCREF(&CoroSocketFile_Type);
     PyModule_AddObject(m, "socketfile", (PyObject*) &CoroSocketFile_Type);
+    
+     /* Initialize the C API pointer array */
+    PyCoev_API[PyCoev_wait_bottom_half_NUM] = (void *)mod_wait_bottom_half;
+    
+    /* Create a CObject containing the API pointer array's address */
+    c_api_object = PyCObject_FromVoidPtr((void *)PyCoev_API, NULL);
+
+    if (c_api_object != NULL)
+        PyModule_AddObject(m, "_C_API", c_api_object);
+
+
 }

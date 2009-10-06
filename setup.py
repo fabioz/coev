@@ -61,4 +61,5 @@ setup(
     test_suite='nose.collector',
     download_url=REPOSITORY,
     ext_modules=[daext],
+    zip_safe=False
 )
