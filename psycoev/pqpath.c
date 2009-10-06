@@ -698,7 +698,7 @@ pq_close(connectionObject *conn) {
     if (closer == NULL)
         Py_FatalError("pq_close(): no memory (psycoev)");
     
-    coev_init(closer, &pq_close_runner, 8*4096);
+    closer = coev_new(&pq_close_runner, 8*4096);
     closer->A = conn;
     coev_schedule(closer);
     
@@ -714,12 +714,10 @@ pq_close(connectionObject *conn) {
         Py_END_ALLOW_THREADS
     }
     
-    if (closer->state != CSTATE_DEAD)
+    if ((closer->state != CSTATE_DEAD) && (closer->state != CSTATE_ZERO) )
         /* this is suprising */
         Py_FatalError("pq_close(): closer coroutine not dead: now what?");
     
-    coev_fini(closer);
-    PyMem_Free(closer);
 }
 
 
