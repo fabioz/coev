@@ -362,6 +362,7 @@ _free_coevs(void) {
 /* end of coev_t allocator */
 
 static void update_treepos(coev_t *);
+static void io_callback(struct ev_loop *, ev_io *, int );
 static void sleep_callback(struct ev_loop *, ev_timer *, int );
 static void iotimeout_callback(struct ev_loop *, ev_timer *, int );
 
@@ -385,6 +386,7 @@ coev_init_root(coev_t *root) {
     root->rq_next = NULL;
     root->child_count = 0;
     
+    ev_init(&root->watcher, io_callback);
     ev_timer_init(&root->io_timer, iotimeout_callback, 23., 42.);
     ev_timer_init(&root->sleep_timer, sleep_callback, 23., 42.);
     
@@ -437,6 +439,7 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->status = CSW_NONE;
     child->rq_next = NULL;
     
+    ev_init(&child->watcher, io_callback);
     ev_timer_init(&child->io_timer, iotimeout_callback, 23., 42.);
     ev_timer_init(&child->sleep_timer, sleep_callback, 23., 42.);
     
@@ -877,15 +880,15 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
          || ev_is_pending(&self->io_timer)
          || ev_is_active(&self->sleep_timer)
          || ev_is_pending(&self->sleep_timer) ) {
-        coev_dprintf("coev_wait(%d, %d, %Lf): inconsistent event watchers' status:"
-            " watcher: a%dp%d io_timer: a%dp%d sleep_timer: a%dp%d \n",
+        coev_dprintf("coev_wait(%d, %d, %f): inconsistent event watchers' status:\n"
+            "    watcher: %c%c\n    io_timer: %c%c\n    sleep_timer: %c%c\n",
              fd, revents, timeout,
-             ev_is_active(&self->watcher) ? 1 : 0,
-             ev_is_pending(&self->watcher) ? 1 : 0,
-             ev_is_active(&self->io_timer) ? 1 : 0,
-             ev_is_pending(&self->io_timer) ? 1 : 0,
-             ev_is_active(&self->sleep_timer) ? 1 : 0,
-             ev_is_pending(&self->sleep_timer) );
+             ev_is_active(&self->watcher) ? 'A' : 'a',
+             ev_is_pending(&self->watcher) ? 'P' : 'p',
+             ev_is_active(&self->io_timer) ? 'A' : 'a',
+             ev_is_pending(&self->io_timer) ? 'P' : 'p',
+             ev_is_active(&self->sleep_timer) ? 'A' : 'a',
+             ev_is_pending(&self->sleep_timer) ? 'P' : 'p' );
         _fm.abort("coev_wait(): inconsistent event watchers' status.");
     }
     
