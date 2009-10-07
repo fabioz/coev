@@ -964,8 +964,11 @@ coev_sleep(ev_tstamp amount) {
     -- if tail != NULL, tail->next == NULL, head != NULL
     -- if head == NULL, tail == NULL, queue is empty.
     
-    returns current scheduler if there is one, or NULL after 
-    there's nothing to schedule left.
+    returns:
+        current scheduler if there is one, 
+        NULL after there's nothing to schedule left, 
+        NULL if it was interrupted by coev_unloop 
+            (ts_scheduler.stop_flag is true in this case)
 
 */
 
@@ -1052,6 +1055,8 @@ void
 coev_unloop(void) {
     /* ts_scheduler.runq_tail = NULL; if we're totally aborting the scheduler */
     ev_unloop(ts_scheduler.loop, EVUNLOOP_ALL);
+    ts_scheduler.stop_flag = 1;
+    coev_dprintf("coev_unloop(): ev_unloop called.");
 }
 
 static void 
