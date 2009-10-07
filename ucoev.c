@@ -1065,7 +1065,7 @@ coev_unloop(void) {
     /* ts_scheduler.runq_tail = NULL; if we're totally aborting the scheduler */
     ev_unloop(ts_scheduler.loop, EVUNLOOP_ALL);
     ts_scheduler.stop_flag = 1;
-    coev_dprintf("coev_unloop(): ev_unloop called.");
+    coev_dprintf("coev_unloop(): ev_unloop called.\n");
 }
 
 static void 
@@ -1109,7 +1109,7 @@ colock_bunch_init(colbunch_t **bunch_p) {
 	if (bunch == NULL)
 	    _fm.abort("ENOMEM allocating lockbunch");
     }
-	
+    bunch->next = NULL;
     bunch->area = _fm.malloc(sizeof(colock_t) * COLOCK_PREALLOCATE);
     
     if (bunch->area == NULL)
