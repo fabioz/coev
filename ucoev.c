@@ -376,6 +376,7 @@ coev_init_root(coev_t *root) {
     ts_root = root;
 
     memset(root, 0, sizeof(coev_t));
+    /* kc/kc_tail init not needed due to memset above */
     
     root->parent = NULL;
     root->run = NULL;
@@ -399,6 +400,7 @@ coev_init_root(coev_t *root) {
 
 /** universal runner */
 static void coev_initialstub(void);
+static void cls_keychain_init(cokeychain_t **);
 
 /** return a ready-to-run coroutine
 Note: stack is allocated using anonymous mmap, so be generous, it won't
@@ -438,6 +440,13 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->state = CSTATE_RUNNABLE;
     child->status = CSW_NONE;
     child->rq_next = NULL;
+    {
+        cokeychain_t *kc = &child->kc;
+        cls_keychain_init(&kc);
+    }
+    
+    child->kc_tail = NULL;
+    child->origin = NULL;
     
     ev_init(&child->watcher, io_callback);
     ev_timer_init(&child->io_timer, iotimeout_callback, 23., 42.);
