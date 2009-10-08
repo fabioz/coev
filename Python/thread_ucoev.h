@@ -84,7 +84,7 @@ coev_frameth_t _cmf = {
 };
 
 static int initialized = 0;
-static size_t _stacksize = 23 * 4096;
+static size_t _stacksize = 2 * 1024 * 1024;
 
 /*
  * Initialization.
