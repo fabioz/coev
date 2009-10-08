@@ -14,11 +14,8 @@
 #include <stdio.h>
 #include <assert.h>
 
-#ifdef MMAP_STACK
 #include <sys/mman.h> /* mmap/munmap */
-#else
 #include <stdlib.h> /* malloc/free */
-#endif
 #include <sys/socket.h>
 #include <ucontext.h>
 #include <errno.h>
@@ -78,6 +75,7 @@ struct _coev_lock_bunch {
 struct _coev_lock {
     colock_t *next;
     coev_t *owner;
+    colbunch_t *bunch;
     int count;
 };
 
@@ -101,8 +99,9 @@ struct _coev_scheduler_stuff {
 
 /* coevst_t declared in header */
 struct _coev_stack {
-    void *p;
-    size_t size;
+    void *base;     /* what to give to munmap */
+    void *sp;       /* what to put into stack_t */
+    size_t size;    /* what to put into stack_t */
     coevst_t *next;
     coevst_t *prev; /* used only in busylist for fast removal */
 #ifdef HAVE_VALGRIND
@@ -123,24 +122,31 @@ _dump_stack_bunch(const char *msg) {
         msg, ts_stack_bunch.avail, ts_stack_bunch.busy);
     p = ts_stack_bunch.avail;
     while(p) {
-        cstk_dprintf("\t<%p>: prev=%p next=%p size=%zd p=%p\n",
-            p, p->prev, p->next, p->size, p->p);
+        cstk_dprintf("\t<%p>: prev=%p next=%p size=%zd base=%p\n",
+            p, p->prev, p->next, p->size, p->base);
         p = p->next;
     }
     cstk_dprintf("\n\tBUSY:\n");
     p = ts_stack_bunch.busy;
     while(p) {
-        cstk_dprintf("\t<%p>: prev=%p next=%p size=%zd p=%p\n",
-            p, p->prev, p->next, p->size, p->p);
+        cstk_dprintf("\t<%p>: prev=%p next=%p size=%zd base=%p\n",
+            p, p->prev, p->next, p->size, p->base);
         p = p->next;
     }
 }
 
 /* for best performance of stack allocation, don't increase stack
 size after application startup. */
+/* TODO: 
+    - pay attention to stack growth direction.
+    - set up guard page. 
+    - align stack start on smallpage boundary (hugepages?)
+    - double check minimal size. 
+*/
 static coevst_t *
 _get_a_stack(size_t size) {
     coevst_t *rv, *prev_avail;
+    void *base;
     
     cstk_dump("_get_a_stack()");
     
@@ -153,22 +159,20 @@ _get_a_stack(size_t size) {
 
     if (!rv) {
         size_t to_allocate = size + sizeof(coevst_t);
-        
-#ifdef MMAP_STACK
-        rv = mmap(NULL, to_allocate, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0); 
-        if (fv == MAP_FAILED)
+    
+        base = mmap(NULL, to_allocate, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_GROWSDOWN, -1, 0); 
+        if (base == MAP_FAILED)
             _fm.eabort("_get_a_stack(): mmap() stack allocation failed", errno);
-#else
-        rv = malloc(to_allocate);
-        if (rv == NULL)
-           _fm.abort("_get_a_stack(): malloc() stack allocation failed");
-#endif
-        rv->size = size;
-        rv->p = ((char *)rv ) + sizeof(coevst_t);
-#ifdef HAVE_VALGRIND
-        rv->vg_id = VALGRIND_STACK_REGISTER( rv->p, ((char *)rv->p) + size);
-#endif
         
+        rv = (coevst_t *) ( base + size );
+        rv->base = base;
+        rv->size = size;
+        rv->sp = base;
+#ifdef HAVE_VALGRIND
+        rv->vg_id = VALGRIND_STACK_REGISTER( rv->sp, rv->sp + size);
+#endif
+        cstk_dprintf("_get_a_stack(): requested %zd allocated %zd base %p sp %p rv %p\n",
+            rv->size, to_allocate, rv->base, rv->sp, rv);
     } else {
         /* remove from the avail list if we took it from there */
         if (prev_avail)
@@ -229,23 +233,19 @@ _free_stacks(void) {
     coevst_t *spa, *spb, *span, *spbn;
     spa = ts_stack_bunch.avail;
     spb = ts_stack_bunch.busy;
+    cstk_dprintf("%s\n", "_free_stacks()");
+
     while (spa || spb) {
         if (spa)
             span = spa->next;
         if (spb)
             spbn = spb->next;
-#ifdef MMAP_STACK
-        
+
         if (spa && ( 0 != munmap(spa, spa->size + sizeof(coevst_t))))
-            _fm.eabort("_free_stacks(): munmap failed.");
+            _fm.eabort("_free_stacks(): munmap failed.", errno);
         if (spb && ( 0 != munmap(spb, spb->size + sizeof(coevst_t))))
-                _fm.eabort("_free_stacks(): munmap failed.");
-#else
-        if (spa)
-            free(spa);
-        if (spb)
-            free(spb);
-#endif
+                _fm.eabort("_free_stacks(): munmap failed.", errno);
+        
 #ifdef HAVE_VALGRIND
         VALGRIND_STACK_DEREGISTER(spa->vg_id);
         VALGRIND_STACK_DEREGISTER(spb->vg_id);
@@ -404,10 +404,10 @@ static void cls_keychain_init(cokeychain_t **);
 
 /** return a ready-to-run coroutine
 Note: stack is allocated using anonymous mmap, so be generous, it won't
-eat physical memory until needed */
+eat physical memory until needed. 2Mb is the libc's default on linux. */
 coev_t *
 coev_new(coev_runner_t runner, size_t stacksize) {
-    coevst_t *sp;
+    coevst_t *cstack;
     coev_t *child;
     
     if (ts_current == NULL)
@@ -417,21 +417,22 @@ coev_new(coev_runner_t runner, size_t stacksize) {
         _fm.abort("coev_init(): stack size too small (less than SIGSTKSZ)");
 
     child = _get_a_coev();
-    sp = _get_a_stack(stacksize);
+    cstack = _get_a_stack(stacksize);
     
     if (getcontext(&child->ctx))
 	_fm.eabort("coev_init(): getcontext() failed", errno);
     
-    child->ctx.uc_stack.ss_sp = sp->p;
-    child->ctx.uc_stack.ss_flags = 0;
+    child->ctx.uc_stack.ss_sp = cstack->sp;
+    /* child->ctx.uc_stack.ss_flags = 0; */
     child->ctx.uc_stack.ss_size = stacksize;
     child->ctx.uc_link = &(((coev_t*)ts_current)->ctx);
-    child->stack = sp;
+    child->stack = cstack;
     
     makecontext(&child->ctx, coev_initialstub, 0);
     
     child->id = ts_count++;
     
+    child->child_count = 0;
     child->parent = (coev_t*)ts_current;
     ts_current->child_count ++;
     
@@ -618,8 +619,12 @@ coev_switch(coev_t *target) {
     ts_current = target;
     _fm.c_switches++;
     
+    cstk_dump("before switch\n");
+    
     if (swapcontext(&origin->ctx, &target->ctx) == -1)
         _fm.abort("coev_switch(): swapcontext() failed.");
+    
+    cstk_dump("after switch\n");
 }
 
 static void
@@ -646,10 +651,16 @@ static void cls_keychain_fini(cokeychain_t *);
 static coev_t *
 _coev_sweep(coev_t *suspect) {
     coev_t *parent;
-    coev_dprintf("_coev_sweep(): starting at [%s] %s\n", suspect->treepos, str_coev_state[suspect->state]);
+    coev_dprintf("_coev_sweep(): starting at [%s] %s cc=%d\n", 
+        suspect->treepos, str_coev_state[suspect->state], suspect->child_count);
     while (suspect != NULL) {
-        if ((suspect->child_count > 0) || (suspect->state != CSTATE_DEAD))
+        if ((suspect->child_count > 0) || (suspect->state != CSTATE_DEAD)) {
+            coev_dprintf("_coev_sweep(): returning [%s] %s cc=%d\n", 
+                suspect->treepos, str_coev_state[suspect->state], suspect->child_count);
             return suspect;
+        }
+        coev_dprintf("_coev_sweep(): releasing [%s] %s cc=%d\n", 
+            suspect->treepos, str_coev_state[suspect->state], suspect->child_count);
         
         parent = suspect->parent;
         _return_a_stack(suspect->stack);
@@ -925,9 +936,10 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
     ts_scheduler.scheduler->origin = self;
     ts_current = ts_scheduler.scheduler;
     
-    
+    cstk_dump("before swapcontext\n");
     if (swapcontext(&self->ctx, &ts_scheduler.scheduler->ctx) == -1)
         _fm.abort("coev_scheduled_switch(): swapcontext() failed.");
+    cstk_dump("after swapcontext\n");
     
     /* we're here either because scheduler switched back
        or someone is being rude. */
@@ -1024,9 +1036,17 @@ coev_loop(void) {
             target->origin = (coev_t *) ts_current;
             target->state = CSTATE_CURRENT;
             ts_current = target;
+            
+            cstk_dump("before swapcontext");
+            cstk_dprintf("target's sp %p origin's sp %p\n", target->ctx.uc_stack.ss_sp,
+                target->origin->ctx.uc_stack.ss_sp);
 
             if (swapcontext(&target->origin->ctx, &target->ctx) == -1)
                 _fm.abort("coev_scheduler(): swapcontext() failed.");
+            
+            cstk_dump("after swapcontext\n");
+            cstk_dprintf("current sp %p origin's sp %p\n", ts_current->ctx.uc_stack.ss_sp,
+                ts_current->origin->ctx.uc_stack.ss_sp);
             
             switch (ts_current->status) {
                 case CSW_VOLUNTARY:
@@ -1082,7 +1102,9 @@ _colock_dump(colbunch_t *subject) {
         lc = p->used;
         i = 0;
         while (lc != NULL) {
-            colo_dprintf("            <%p>: owner [%s] count %d\n", lc, lc->owner != NULL ? lc->owner->treepos : "(nil)", lc->count);
+            colo_dprintf("            <%p>: owner [%s] count %d bunch %p\n", lc, 
+                lc->owner != NULL ? lc->owner->treepos : "(nil)", 
+                lc->count, lc->bunch);
             lc = lc->next;
             i++;
         }
@@ -1091,7 +1113,9 @@ _colock_dump(colbunch_t *subject) {
         lc = p->avail;
         i = 0;
         while (lc != NULL) {
-            colo_dprintf("            <%p>: owner [%s] count %d\n", lc, lc->owner != NULL ? lc->owner->treepos : "(nil)", lc->count);
+            colo_dprintf("            <%p>: owner [%s] count %d bunch %p\n", lc, 
+                lc->owner != NULL ? lc->owner->treepos : "(nil)", 
+                lc->count, lc->bunch);
             lc = lc->next;
             i++;
         }
@@ -1117,13 +1141,17 @@ colock_bunch_init(colbunch_t **bunch_p) {
     
     memset(bunch->area, 0, sizeof(colock_t) * COLOCK_PREALLOCATE);
     bunch->allocated =  COLOCK_PREALLOCATE;
-    bunch->avail = bunch->area;
     {
         int i;
         
-        for(i=1; i < COLOCK_PREALLOCATE; i++)
+        for(i=1; i < COLOCK_PREALLOCATE; i++) {
             bunch->area[i-1].next = &(bunch->area[i]);
+            bunch->area[i-1].bunch = bunch;
+        }
+        bunch->area[COLOCK_PREALLOCATE-1].bunch = bunch;
     }
+    bunch->avail = bunch->area;
+    bunch->used = NULL;
     
     *bunch_p = bunch;
     colo_dprintf("colock_bunch_init(%p): allocated at %p.\n", bunch_p, bunch);
@@ -1176,27 +1204,15 @@ colock_allocate(void) {
 void 
 colock_free(colock_t *lock) {
     colock_t *prev;
-    colbunch_t *bunch = ts_rootlockbunch;
+    colbunch_t *bunch = lock->bunch;
     
-    lock->owner = NULL; /* pity the fools supplying null pointers */
+    lock->owner = NULL; 
     
-    if (bunch->next) { /* if we have >1 bunch out there .. */
-	while (bunch) { 
-	    /* pointer magic is so pointer */
-	    if (   (lock > bunch->area) 
-		&& ( (lock - bunch->area) < bunch->allocated) )
-		    /* gotcha */
-		    break;
-	    bunch = bunch->next;
-	}
-    }
-    colo_dprintf("colock_free(): [%s] deallocates [%s]'s %p\n", ts_current->treepos, 
-        lock->owner != NULL ? lock->owner->treepos : "(nil)",  lock);
-    
-    if (!bunch)
-	_fm.abort("Attempt to free non-existent lock");
+    colo_dprintf("colock_free(%p): [%s] deallocates [%s]'s %p (of bunch %p)\n", lock, ts_current->treepos, 
+        lock->owner != NULL ? lock->owner->treepos : "(nil)",  lock, bunch);
     
     prev = bunch->used;
+    
     if ( lock != prev ) {
 	/* find previous lock in the used list */
 	while (prev->next != lock) {
@@ -1384,7 +1400,7 @@ static const ssize_t CNRBUF_MAGIC = 1<<12;
 void 
 cnrbuf_init(cnrbuf_t *self, int fd, double timeout, size_t prealloc, size_t rlim) {
     self->in_allocated = prealloc;
-    self->in_limit = 0;
+    self->in_limit = CNRBUF_MAGIC;
     self->iop_timeout = timeout;
     self->in_buffer = _fm.malloc(self->in_allocated);
     self->fd = fd;
@@ -1402,19 +1418,24 @@ cnrbuf_fini(cnrbuf_t *buf) {
 
 static void
 _cnrb_dump(cnrbuf_t *self) {
-    ssize_t top_free, total_free, bottom_free;
+    ssize_t top_free, total_free, bottom_free, used_start_off, used_end_off;
 
     top_free = self->in_position - self->in_buffer;
     total_free = self->in_allocated - self->in_used;
     bottom_free = total_free - top_free;
+    used_start_off = self->in_position - self->in_buffer;
+    used_end_off = used_start_off + self->in_used;
 
     _fm.dprintf("buffer metadata:\n"
-    "\tbuf=%p pos=%p pos offset %zd\n"
+    "\tbuf=%p pos=%p used offsets %zd  - %zd \n"
     "\tallocated=%zd used=%zd limit=%zd\n"
     "\ttop_free=%zd bottom_free=%zd\ttotal_free=%zd\n",
-	self->in_buffer, self->in_position, self->in_position - self->in_buffer, 
+	self->in_buffer, self->in_position, used_start_off, used_end_off,
 	self->in_allocated, self->in_used, self->in_limit,
 	top_free, bottom_free, total_free);
+    assert(used_start_off <= self->in_allocated);
+    assert(used_end_off <= self->in_allocated);
+    
 }
 
 /** makes some space at the end of the read buffer 
@@ -1438,31 +1459,26 @@ sf_reshuffle_buffer(cnrbuf_t *self, ssize_t needed) {
         needed, needed + 2 * CNRBUF_MAGIC, total_free);
     if (needed + 2 * CNRBUF_MAGIC > total_free ) {
 	/* reallocation imminent - grow by at most 2*CNRBUF_MAGIC more than needed */
+        ssize_t posn_offset;
 	ssize_t newsize = (self->in_used + needed + 2*CNRBUF_MAGIC) & (~(CNRBUF_MAGIC-1));
         if (newsize > self->in_limit)
             self->in_limit = newsize;
-	char *newbuf = _fm.realloc(self->in_buffer, newsize);
-	if (!newbuf) {
-	/* memmove imminent */
-	    newbuf = _fm.malloc(newsize);
-	    if (!newbuf) {
-                errno = ENOMEM;
-		return -1; /* no memory */
-            }
-	    memmove(newbuf, self->in_position, self->in_used);
-	    _fm.free(self->in_buffer);
-	    self->in_position = self->in_buffer = newbuf;
-	    self->in_allocated = newsize;
-            cnrb_dprintf("sf_reshuffle_buffer(*,%zd): realloc failed, newsize %zd\n:", 
-                needed, self->in_allocated);
-            cnrb_dump(self);
-	    return 0;
-	}
+        
+        posn_offset = self->in_position - self->in_buffer;
+	self->in_buffer = _fm.realloc(self->in_buffer, newsize);
+        
+        if (!self->in_buffer) {
+            errno = ENOMEM;
+            return -1; /* no memory */
+        }
         self->in_allocated = newsize;
+        self->in_position = self->in_buffer + posn_offset;
         cnrb_dprintf("sf_reshuffle_buffer(*,%zd): realloc successful: newsize=%zd\n", 
             needed, self->in_allocated);
     }
     /* we're still have 2*CNRBUF_MAGIC bytes more than needed */
+    /* OR we just reallocated the buffer and let's move */
+    /* the used bytes to the top anyway */
     
     memmove(self->in_buffer, self->in_position, self->in_used);
     self->in_position = self->in_buffer;
