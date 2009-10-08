@@ -15,20 +15,23 @@
 
 """Python-PostgreSQL Database Adapter
 
-psycoev is a coev (io-scheduled coroutines)-enabled fork of psycopg2, 
-which is a PostgreSQL database adapter for the Python programming
-language. 
+psycoev is a libucoev/coev (io-scheduled coroutines)-enabled 
+fork of psycopg2, which is a PostgreSQL database adapter 
+for the Python programming language. 
 
-psycoev is different from the psycopg2 because it utilises coev library
-for highly concurrent asynchronous i/o, it does not support pre-v3 protocol
-and is explicitly thread-unsafe.
+psycoev is different from the psycopg2:
+  - it is meant to be used with coev-enabled Python interpreter
+  - it does not support pre-v3 protocol.
 
 Caveats: only tested on Linux, COPY IN/COPY OUT not tested, lobject not 
 implemented.
+
+Google also: libucoev, python-coev
+
 """
 
 classifiers = """\
-Development Status :: 4 - Beta
+Development Status :: 3 - Alpha
 Intended Audience :: Developers
 License :: OSI Approved :: GNU General Public License (GPL)
 License :: OSI Approved :: Zope Public License
@@ -39,8 +42,7 @@ Topic :: Database
 Topic :: Database :: Front-Ends
 Topic :: Software Development
 Topic :: Software Development :: Libraries :: Python Modules
-Operating System :: Microsoft :: Windows
-Operating System :: Unix
+Operating System :: POSIX
 """
 
 import os
@@ -54,7 +56,7 @@ from distutils.command.build_ext import build_ext
 from distutils.sysconfig import get_python_inc
 from distutils.ccompiler import get_default_compiler
 
-PSYCOEV_VERSION = '0.1'
+PSYCOEV_VERSION = '0.2'
 version_flags   = ['dt', 'dec']
 
 PLATFORM_IS_WINDOWS = sys.platform.lower().startswith('win')
