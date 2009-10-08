@@ -1,5 +1,6 @@
 #define PY_SSIZE_T_CLEAN
 #include "Python.h"
+#include "pythread.h"
 
 #include <sys/types.h>
 #include <time.h>
@@ -884,6 +885,12 @@ initcoev(void) {
 
     if (c_api_object != NULL)
         PyModule_AddObject(m, "_C_API", c_api_object);
-
-
+    
+    /* force libcoev initialization */
+    { 
+        PyThread_type_lock l;
+        
+        l = PyThread_allocate_lock();
+        PyThread_release_lock(l);
+    }
 }
