@@ -1855,3 +1855,6 @@ coev_libfini(void) {
     _free_coevs(); /* yep. worse than the above. */
 }
 
+void coev_fork_notify(void) {
+    ev_default_fork();
+}

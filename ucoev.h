@@ -209,6 +209,9 @@ typedef struct _coev_framework_methods {
 void coev_libinit(const coev_frameth_t *fm, coev_t *root);
 void coev_libfini(void);
 
+/* call this immediately after a fork. */
+void coev_fork_notify(void);
+
 coev_t *coev_new(coev_runner_t runner, size_t stacksize);
 
 coev_t *coev_current(void);
