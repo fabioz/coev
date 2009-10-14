@@ -607,12 +607,20 @@ mod_wait_bottom_half(void) {
             PyErr_SetString(PyExc_CoroTimeout,
 		    "IO timeout");        
             return NULL;
+     
         case CSW_TARGET_DEAD:
-        case CSW_TARGET_BUSY:
-	case CSW_TARGET_SELF:
-            PyErr_SetString(PyExc_CoroError,
-		    "wait(): CSW_SWITCH_TO_SELF/DEAD/BUSY");
+            PyErr_SetNone(PyExc_CoroTargetDead);
             return NULL;
+        case CSW_TARGET_BUSY:
+            PyErr_SetNone(PyExc_CoroTargetBusy);
+            return NULL;
+	case CSW_TARGET_SELF:
+            PyErr_SetNone(PyExc_CoroTargetSelf);
+            return NULL;
+        case CSW_SCHEDULER_NEEDED:
+            PyErr_SetNone(PyExc_CoroNoScheduler);
+            return NULL;
+            
         default:
             coro_dprintf("wait(): unknown switchback type %d\n", cur->status);
             PyErr_SetString(PyExc_CoroError,
