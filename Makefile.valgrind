@@ -1,4 +1,5 @@
-CFLAGS=-fwrapv -O2 -fno-strict-aliasing -Wstrict-prototypes -g -Wall -fPIC 
+CFLAGS=-fwrapv -fno-strict-aliasing -Wstrict-prototypes -g -Wall -fPIC 
+CFLAGS+=-DHAVE_VALGRIND -I/usr/include/valgrind
 
 PREFIX?=~/prefix
 
