@@ -1,39 +1,26 @@
 #!/usr/bin/env python
 
-import ez_setup
-ez_setup.use_setuptools()
-
 from setuptools import setup, Extension
 
-VERSION = '0.3'
-DESCRIPTION = 'libcoev bindings - I/O-scheduled coroutines'
+VERSION = '0.5'
+DESCRIPTION = 'libucoev bindings - I/O-scheduled coroutines'
 LONG_DESCRIPTION = """
-    This is one half of py.magic.greenlet module fork/split.
-    (<http://codespeak.net/py/>)
+    This is one half of greenlet/stackless - inspired .
 
-    The "greenlet" package is a spin-off of Stackless, a version of CPython that
-    supports micro-threads called "tasklets".  Tasklets run pseudo-concurrently
-    (typically in a single or a few OS-level threads) and are synchronized with
-    data exchanges on "channels".
-
-    A "greenlet", on the other hand, is a still more primitive notion of
-    micro-thread with no implicit scheduling; coroutines, in other words.
-
-    Greenlets are provided as a C extension module for the regular unmodified
-    interpreter.
-
-    libcoev and the present module are the results of separating coroutine 
-    implementation in C from the python interface, and then slapping an 
-    libev-based scheduler on top. 
+    libucoev, ucoev Python threading model and the present module 
+    are the results of implementing event- and cooperatively-
+    scheduled coroutines on top of ucontext_t and associated libc 
+    functions.
 """
 
 CLASSIFIERS = filter(None, map(str.strip,
-"""                 
+"""
+Development Status :: 3 - Alpha
 Intended Audience :: Developers
 License :: OSI Approved :: MIT License
 Natural Language :: English
 Programming Language :: Python
-Operating System :: OS Independent
+Operating System :: POSIX
 Topic :: Software Development :: Libraries :: Python Modules
 """.splitlines()))
 
@@ -43,9 +30,8 @@ daext = Extension(
     name='coev', 
     sources=['modcoev.c'], 
     undef_macros=['NDEBUG'],
-    libraries=['ucoev'],
-    include_dirs = ['/home/lxnt/projects/ucoev/libcoev-ucontext'],
-    library_dirs = ['/home/lxnt/projects/ucoev/libcoev-ucontext'])
+    libraries=['ucoev']
+    )
 
 setup(
     name="coev",
