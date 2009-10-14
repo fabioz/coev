@@ -1,3 +1,6 @@
+This package was adapted to use libucoev/python-coev asynchronous IO
+by Alexander Sabourenkov.
+
 This package was originally written by Evan Martin of Danga.
 Sean Reifschneider of tummy.com, ltd. has taken over maintenance of it.
 

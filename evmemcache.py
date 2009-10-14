@@ -49,6 +49,8 @@ import time
 import os
 import re
 import types
+import errno
+import coev
 try:
     import cPickle as pickle
 except ImportError:
@@ -871,8 +873,6 @@ class _Host:
         self.deaduntil = 0
         self.socket = None
 
-        self.buffer = ''
-
     def _check_dead(self):
         if self.deaduntil and self.deaduntil > time.time():
             return 1
@@ -895,18 +895,24 @@ class _Host:
         if self.socket:
             return self.socket
         s = socket.socket(self.family, socket.SOCK_STREAM)
-        if hasattr(s, 'settimeout'): s.settimeout(self._SOCKET_TIMEOUT)
+        s.setblocking(0)
         try:
-            s.connect(self.address)
-        except socket.timeout, msg:
-            self.mark_dead("connect: %s" % msg)
-            return None
+            try:
+                s.connect(self.address)
+            except socket.error, msg:
+                if msg[0] == errno.EINPROGRESS:
+                    coev.wait(s.fileno(), coev.WRITE, self._SOCKET_TIMEOUT)
+                else:
+                    if type(msg) is types.TupleType: msg = msg[1]
+                    self.mark_dead("connect: %s" % msg[1])
+                    return None
         except socket.error, msg:
             if type(msg) is types.TupleType: msg = msg[1]
             self.mark_dead("connect: %s" % msg[1])
             return None
+                
         self.socket = s
-        self.buffer = ''
+        self.sfile = coev.socketfile(s.fileno(), self._SOCKET_TIMEOUT, 4096)
         return s
 
     def close_socket(self):
@@ -915,31 +921,17 @@ class _Host:
             self.socket = None
 
     def send_cmd(self, cmd):
-        self.socket.sendall(cmd + '\r\n')
+        self.sfile.write(cmd + '\r\n')
 
     def send_cmds(self, cmds):
         """ cmds already has trailing \r\n's applied """
-        self.socket.sendall(cmds)
+        self.sfile.write(cmds)
 
     def readline(self):
-        buf = self.buffer
-        recv = self.socket.recv
-        while True:
-            index = buf.find('\r\n')
-            if index >= 0:
-                break
-            data = recv(4096)
-            if not data:
-                self.mark_dead('Connection closed while reading from %s'
-                        % repr(self))
-                break
-            buf += data
-        if index >= 0:
-            self.buffer = buf[index+2:]
-            buf = buf[:index]
-        else:
-            self.buffer = ''
-        return buf
+        line = self.sfile.readline()
+        if line[-2:] == '\r\n':
+            return line[:-2]
+        return line
 
     def expect(self, text):
         line = self.readline()
@@ -948,16 +940,7 @@ class _Host:
         return line
 
     def recv(self, rlen):
-        self_socket_recv = self.socket.recv
-        buf = self.buffer
-        while len(buf) < rlen:
-            foo = self_socket_recv(4096)
-            buf += foo
-            if len(foo) == 0:
-                raise _Error, ( 'Read %d bytes, expecting %d, '
-                        'read returned 0 length bytes' % ( len(buf), rlen ))
-        self.buffer = buf[rlen:]
-        return buf[:rlen]
+        return self.sfile.read(rlen)
 
     def __str__(self):
         d = ''
@@ -997,13 +980,13 @@ def check_key(key, key_extra_len=0):
                 raise Client.MemcachedKeyCharacterError, "Control characters not allowed"
 
 def _doctest():
-    import doctest, memcache
+    import doctest, evmemcache
     servers = ["127.0.0.1:11211"]
     mc = Client(servers, debug=1)
     globs = {"mc": mc}
-    return doctest.testmod(memcache, globs=globs)
+    return doctest.testmod(evmemcache, globs=globs)
 
-if __name__ == "__main__":
+def test_runner():
     print "Testing docstrings..."
     _doctest()
     print "Running tests:"
@@ -1146,5 +1129,11 @@ if __name__ == "__main__":
             print "FAIL"
         else:
           print "OK"
+
+if __name__ == "__main__":
+    import thread
+    thread.start_new_thread(test_runner,())
+    coev.scheduler()
+
 
 # vim: ts=4 sw=4 et :
