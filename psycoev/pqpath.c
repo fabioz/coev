@@ -652,7 +652,7 @@ pq_abort(connectionObject *conn)
 
     if (    (conn->isolation_level == 0) 
          || (conn->status != CONN_STATUS_BEGIN)) {
-        Dprintf("pq_abort_locked: no transaction to abort");
+        Dprintf("pq_abort: no transaction to abort");
         return 0;
     }
 

@@ -139,7 +139,7 @@ psyco_conn_rollback(connectionObject *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "")) 
         return NULL;
 
-    if (!conn_rollback(self))
+    if (conn_rollback(self))
         return NULL;
 
     Py_INCREF(Py_None);
