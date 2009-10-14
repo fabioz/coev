@@ -1553,7 +1553,9 @@ rerecv:
             } else {
                 self->err_no = errno;
             }
-	}
+	} else {
+            self->in_used += readen;
+        }
         
     } while (readen > 0);
     
