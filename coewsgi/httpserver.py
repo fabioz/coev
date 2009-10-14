@@ -1,10 +1,10 @@
 import socket, errno, urlparse, urllib, posixpath, sys
-import coev
-from paste.util import converters
+import coev, thread
 from BaseHTTPServer import BaseHTTPRequestHandler
+
 SocketErrors = (socket.error,)
 
-__version__ = '0.2'
+__version__ = '0.3'
 
 class CoevWSGIServer(object):
     """ coev server almost compatible with BaseHTTPRequestHandler """
@@ -13,12 +13,12 @@ class CoevWSGIServer(object):
     socket_type = socket.SOCK_STREAM
     request_queue_size = 5
     allow_reuse_address = True
-    accept_timeout = 5
+    accept_timeout = 5.0
     max_request_size = 1048576 # 1M
     
     def __init__(self, wsgi_application, server_address, 
                         RequestHandlerClass = None,
-                        request_queue_size = 5, 
+                        request_queue_size = 500, 
                         iop_timeout = 5,
                         wsgi_timeout = 5 ):
         self.server_address = server_address
@@ -54,25 +54,19 @@ class CoevWSGIServer(object):
                     if e.errno == 11:
                         break
                 so.setblocking(False);
-                sys.__stderr__.write("\n\nCoevWSGIServer.serve(): accepted connection fd %d" % so.fileno())
-                sys.__stderr__.write("\n\n")
-                handler = coev.coroutine(self.handler)
-                handler.switch((so, ai, self, handler))
-                sys.__stderr__.write("\n\nCoevWSGIServer.serve(): switch returned.\n\n")
-            sys.__stderr__.write("\n\nCoevWSGIServer.serve(): accept() EAGAIN.\n\n")
+                handler = thread.start_new_thread(self.handler, (so, ai, self, None))
             # wait for connects
             try:
                 coev.wait(fd, coev.READ, self.accept_timeout)
-            except coev.Timeout:
-                continue
-            except coev.Exit:
-                break
+            except (coev.WaitAbort, coev.Timeout):
+                pass
             
 
         self.__serving = False
 
-    def handler(self, args):
+    def handler(self, *args):
         self.RequestHandlerClass(*args)
+        
 
     def shutdown(self):
         self.__serving = False
@@ -340,7 +334,10 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         self.connection = self.request
         self.rfile = self.wfile = coev.socketfile(self.request.fileno(), 
             self.server.iop_timeout, self.server.max_request_size)
-        self.handle()
+        try:
+            self.handle()
+        finally:
+            self.request.close()
     
     def watch_handling(self, timeout):
         coev.sleep(timeout)
@@ -352,7 +349,6 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         except coev.Timeout:
             self.close_connection = 1
             return
-        sys.__stderr__.write("\n\nrequest: " +  repr(self.raw_requestline) + "\n\n")
         if not self.raw_requestline:
             self.close_connection = 1
             return
@@ -360,7 +356,6 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
             self.close_connection = 1
             return
         self.wsgi_execute()
-        sys.__stderr__.write("\nwsgi_execute returned\n\n")
 
     def handle(self):
         # don't bother logging disconnects while handling a request
@@ -371,6 +366,8 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
             while not self.close_connection:
                 self.handle_one_request()
         except SocketErrors, exce:
+            self.wsgi_connection_drop(exce)
+        except coev.SocketError, exce:
             self.wsgi_connection_drop(exce)
 
     def address_string(self):
@@ -390,7 +387,7 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
     assert not ssl_context, "SSL/TLS not supported"
     assert not ssl_pem, "SSL/TLS not supported"
     assert not use_threadpool, "threads are evil"
-    assert converters.asbool(start_loop), "WTF?"
+    #assert converters.asbool(start_loop), "WTF?"
     """
     Serves your ``application`` over HTTP via WSGI interface
 
@@ -479,13 +476,19 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
     finally:
         server.unbind()
 
+def thunk(app, args):
+    try:
+        serve(app, **args)
+    except Exception, e:
+        print "aborting"
+        sys.exit(0)
+
 
 # For paste.deploy server instantiation (egg:Egste#http)
 # Note: this gets a separate function because it has to expect string
 # arguments (though that's not much of an issue yet, ever?)
 def server_runner(wsgi_app, global_conf, **kwargs):
-    print repr(global_conf)
-    print repr(kwargs)
+    sys.setcheckinterval(10000000)
     
     from paste.deploy.converters import asbool
     for name in ['port', 'socket_timeout']:
@@ -495,25 +498,20 @@ def server_runner(wsgi_app, global_conf, **kwargs):
         and 'error_email' in global_conf):
         kwargs['error_email'] = global_conf['error_email']
     
-    coev.setdebug(3,3)
-    def thunk(tup):
-        serve(tup[0], **tup[1])
-    server = coev.coroutine(thunk)
-    server.switch((wsgi_app, kwargs))
-    while True:
-        coev.scheduler()
-        print "scheduler exit, switching to server"
-        server.switch()
-        print "server switch returned, running scheduler"
+    server = thread.start_new_thread(thunk, (wsgi_app, kwargs))
+    coev.scheduler()
 
 
 if __name__ == '__main__':
+    sys.setcheckinterval(10000000)
+    coev.setdebug(True, coev.CDF_COEV | coev.CDF_COEV_DUMP |coev.CDF_RUNQ_DUMP | coev.CDF_NBUF)
+    #coev.setdebug(False, 0)
+    #coev.setdebug(True, 0xf | coev.CDF_NBUF)
+    sys.excepthook = sys.__excepthook__
     from paste.wsgilib import dump_environ
     kwargs = { 'server_version': "Wombles/1.0", 'protocol_version': "HTTP/1.1", 'port': "8888" }
-    def thunk(tup):
-        serve(tup[0], **tup[1])
-    coev.setdebug(3,3)
-    server = coev.coroutine(thunk)
-    server.switch((dump_environ, kwargs))
+
+    server = thread.start_new_thread(thunk, (dump_environ, kwargs))
     coev.scheduler()
-    print "coev.scheduler() exited."
+    
+    

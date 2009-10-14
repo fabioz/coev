@@ -1,26 +1,40 @@
-from setuptools import setup, find_packages
-import sys, os
+from setuptools import setup
 
-version = '0.2'
+VERSION = '0.3'
+DESCRIPTION = 'coewsgi - coev-based HTTP WSGI gateway'
+LONG_DESCRIPTION = """
+    A port of HTTP WSGI gateway from Paste to the coev
+    IO event-scheduled corourine framework.
+"""
+
+CLASSIFIERS = filter(None, map(str.strip,
+"""
+Development Status :: 3 - Alpha
+Intended Audience :: Developers
+License :: OSI Approved :: MIT License
+Natural Language :: English
+Programming Language :: Python
+Operating System :: POSIX
+Topic :: Software Development :: Libraries :: Python Modules
+""".splitlines()))
+
+REPOSITORY="http://coev.lxnt.info/"
+
 
 setup(name='coewsgi',
-      version=version,
-      description="coev-compatible http wsgi gateway",
-      long_description="""\
-""",
-      classifiers=[], # Get strings from http://pypi.python.org/pypi?%3Aaction=list_classifiers
-      keywords='',
+      version=VERSION,
+      description=DESCRIPTION,
+      long_description=LONG_DESCRIPTION,
+      classifiers=CLASSIFIERS,
       author='Alexander Sabourenkov',
       author_email='screwdriver@lxnt.info',
       url='http://coev.lxnt.info/',
-      license='',
-      packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
+      license='MIT License',
+      packages=['coewsgi'],
       include_package_data=True,
-      zip_safe=True,
-      install_requires=[ 'coev >= 0.3' ],
-      entry_points="""
-      # -*- Entry points: -*-
-        [paste.server_runner]
-        http = coewsgi.httpserver:server_runner      
-      """,
+      zip_safe=False,
+      install_requires=[ 'coev >= 0.5' ],
+      entry_points= {
+        'paste.server_runner' : [ 'http = coewsgi.httpserver:server_runner' ]
+        }
       )
