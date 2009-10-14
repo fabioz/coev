@@ -247,7 +247,8 @@ PyThread_delete_key_value(int key) {
  */
 void
 PyThread_ReInitTLS(void) {
-    tuco_dprintf("PyThread_ReInitTLS():  haha try harder\n");
+    coev_fork_notify();
+    tuco_dprintf("PyThread_ReInitTLS(): called coev_fork_notify().\n");
 }
 
 /* set the thread stack size.
