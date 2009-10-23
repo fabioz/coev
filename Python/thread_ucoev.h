@@ -58,10 +58,6 @@ pY_FatalErrno(const char *msg, int e) {
 static time_t start_time;
 #ifdef Py_DEBUG
 #define tuco_dprintf(fmt, args...) _tuco_dprintf(fmt, ## args)
-#else
-#define tuco_dprintf(fmt, args...)
-#endif
-
 static int
 _tuco_dprintf(const char *fmt, ...) {
     va_list ap;
@@ -77,7 +73,14 @@ _tuco_dprintf(const char *fmt, ...) {
     errno = saved_errno;
     return rv;
 }
+#else
+#define tuco_dprintf(fmt, args...)
+#endif
 
+static void
+_dump_coev_dmesg(const char *p, size_t l) {
+    fwrite(p, l, 1, stderr);
+}
 
 static coev_t coev_main;
 
@@ -89,7 +92,8 @@ coev_frameth_t _cmf = {
     Py_FatalError,              /* abort */
     pY_FatalErrno,              /* abort with errno */
     python_augmented_inthdlr,   /* unloop at SIGINT */
-    _tuco_dprintf,              /* debug sink */
+    0x10000,                    /* debug buffer size 64K */
+    _dump_coev_dmesg,           /* debug sink */
     0,                          /* debug flags */
 };
 
