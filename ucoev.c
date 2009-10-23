@@ -12,11 +12,13 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <assert.h>
 
 #include <sys/mman.h> /* mmap/munmap */
 #include <stdlib.h> /* malloc/free */
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <ucontext.h>
 #include <errno.h>
 
@@ -36,29 +38,75 @@
 #define CROSSTHREAD_CHECK(target, rv)
 #endif
 
+static coev_frameth_t _fm;
+static char *dmesg = NULL;
+static char *dm_cp = NULL; /* points at the first 0 byte in the dmesg */
+static struct timeval started_at;
+
+static void
+flush_dmesg(void) {
+    if (dm_cp - dmesg < 1024) {
+        _fm.dm_flush(dmesg, dm_cp - dmesg);
+        dm_cp = dmesg;
+    }
+}
+
+void 
+coev_dmprintf(const char *fmt, ...) {
+    va_list ap;
+    int rv, saved_errno;
+    struct timeval tv, delta;
+    
+    saved_errno = errno;
+    
+    gettimeofday(&tv, NULL);
+    
+    if (tv.tv_usec > started_at.tv_usec) {
+        delta.tv_sec = tv.tv_sec - started_at.tv_sec;
+        delta.tv_usec = tv.tv_usec - started_at.tv_usec;
+    } else {
+        delta.tv_sec = tv.tv_sec - started_at.tv_sec - 1;
+        delta.tv_usec = 1000000 + tv.tv_usec - started_at.tv_usec;
+    }
+    
+    flush_dmesg();
+    rv = snprintf(dm_cp, _fm.dm_size - (dm_cp - dmesg) - 1, "[%03ld.%06ld] ", delta.tv_sec, delta.tv_usec);
+    dm_cp += rv;
+    
+    flush_dmesg();
+    va_start(ap, fmt);
+    rv = vsnprintf(dm_cp, _fm.dm_size - (dm_cp - dmesg) - 1, fmt, ap);
+    va_end(ap);
+    if (rv < _fm.dm_size - (dm_cp - dmesg) - 1) 
+        dm_cp += rv;
+    else
+        flush_dmesg();
+    errno = saved_errno;
+}
+
 #define cgen_dprintf(t, fmt, args...) do { if (_fm.debug & t) \
-    _fm.dprintf(fmt, ## args); } while(0)
+    coev_dmprintf(fmt, ## args); } while(0)
 
 #define coev_dprintf(fmt, args...) do { if (_fm.debug & CDF_COEV) \
-    _fm.dprintf(fmt, ## args); } while(0)
+    coev_dmprintf(fmt, ## args); } while(0)
 
 #define coev_dump(msg, coev) do { if (_fm.debug & CDF_COEV_DUMP) \
     _coev_dump(msg, coev); } while(0)
 
 #define cnrb_dprintf(fmt, args...) do { if (_fm.debug & CDF_NBUF) \
-    _fm.dprintf(fmt, ## args); } while(0)
+    coev_dmprintf(fmt, ## args); } while(0)
 
 #define cnrb_dump(nbuf) do { if (_fm.debug & CDF_NBUF_DUMP) \
     _cnrb_dump(nbuf); } while(0)
 
 #define colo_dprintf(fmt, args...) do { if (_fm.debug & CDF_COLOCK) \
-    _fm.dprintf(fmt, ## args); } while(0)
+    coev_dmprintf(fmt, ## args); } while(0)
 
 #define colo_dump(lb) do { if (_fm.debug & CDF_COLOCK_DUMP) \
     _colock_dump(lb); } while(0)
 
 #define cstk_dprintf(fmt, args...) do { if (_fm.debug & CDF_STACK) \
-    _fm.dprintf(fmt, ## args); } while(0)
+    coev_dmprintf(fmt, ## args); } while(0)
 
 #define cstk_dump(msg) do { if (_fm.debug & CDF_STACK_DUMP) \
     _dump_stack_bunch(msg); } while(0)
@@ -84,7 +132,6 @@ static TLS_ATTR volatile int ts_count;
 static TLS_ATTR coev_t *ts_root;
 static TLS_ATTR colbunch_t *ts_rootlockbunch;
 static TLS_ATTR long ts_cls_last_key;
-static coev_frameth_t _fm;
 
 static TLS_ATTR
 struct _coev_scheduler_stuff {
@@ -544,8 +591,8 @@ coev_status(coev_t *c) {
 static void
 _coev_dump(char *m, coev_t *c) { 
     if (m) 
-        _fm.dprintf("%s\n", m);
-    _fm.dprintf( "coev_t<%p> [%s] %s, %s (current<%p> root<%p>):\n"
+        coev_dmprintf("%s\n", m);
+    coev_dmprintf( "coev_t<%p> [%s] %s, %s (current<%p> root<%p>):\n"
             "    is_current: %d\n"
             "    is_root:    %d\n"
             "    is_sched:   %d\n"
@@ -1426,7 +1473,7 @@ _cnrb_dump(cnrbuf_t *self) {
     used_start_off = self->in_position - self->in_buffer;
     used_end_off = used_start_off + self->in_used;
 
-    _fm.dprintf("buffer metadata:\n"
+    coev_dmprintf("buffer metadata:\n"
     "\tbuf=%p pos=%p used offsets %zd  - %zd \n"
     "\tallocated=%zd used=%zd limit=%zd\n"
     "\ttop_free=%zd bottom_free=%zd\ttotal_free=%zd\n",
@@ -1840,7 +1887,18 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     memset(&ts_stack_bunch, 0, sizeof(struct _coev_stack_bunch));
     memset(&ts_coev_bunch, 0, sizeof(struct _coev_t_bunch));
     
+    if (_fm.dm_size < 4096)
+        _fm.dm_size = 4096;
+    
+    dmesg = dm_cp = _fm.malloc(_fm.dm_size);
+    if (!dmesg)
+        _fm.abort("coev_libinit(): dmesg allocation failed.");
+    memset(dmesg, 0, _fm.dm_size);
+    
+    
+    
     coev_init_root(root);
+    gettimeofday(&started_at, NULL);
 }
 
 void
@@ -1853,6 +1911,8 @@ coev_libfini(void) {
     cls_keychain_fini(ts_current->kc.next);
     _free_stacks(); /* this effectively kills all coroutines, unbeknowst to them. */
     _free_coevs(); /* yep. worse than the above. */
+    _fm.dm_flush(dmesg, dm_cp - dmesg); /* dump whatever's left in the dmesg buffer */
+    _fm.free(dmesg);
 }
 
 void coev_fork_notify(void) {

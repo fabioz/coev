@@ -189,7 +189,8 @@ typedef struct _coev_framework_methods {
     void (*inthdlr)(void);
     
     /* debug output collector */
-    int (*dprintf)(const char *format, ...);
+    size_t dm_size;
+    void (*dm_flush)(const char *start, size_t length);
     
     /* debug output bitmask*/
     int debug;
@@ -359,7 +360,7 @@ void coev_getstats(uint64_t *ary);
 #define CDF_STACK_DUMP   0x200   /* stack bunch dumps */
 
 void coev_setdebug(int flagsmask);
-
+void coev_dmprintf(const char *, ...);
 
 
 #ifdef __cplusplus
