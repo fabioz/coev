@@ -127,21 +127,8 @@ static struct _exc_def {
     { 0 }
 };
 
-static int
-_coro_dprintf(const char *fmt, ...) {
-    va_list ap;
-    int rv;
-
-    fprintf(stderr, "[%d] ", (int) (time(NULL) - start_time));
-    va_start(ap, fmt);
-    rv = vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    fflush(stderr);
-    return rv;
-}
-
 #define coro_dprintf(fmt, args...) do { if (debug_flag) \
-    _coro_dprintf(fmt, ## args); } while(0)
+    coev_dmprintf(fmt, ## args); } while(0)
 
 static PyObject *mod_switch_bottom_half(coev_t *target);
 
