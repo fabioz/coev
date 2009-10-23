@@ -15,19 +15,28 @@
         4. deallocation of coev_t structures is done in 
            modcoev's mod_wait_bottom_half, not here.
            
-        It's ugly.
+        It's ugly. Had to patch threadmodule.c :(.
 
-  coev_t::{A, X, Y} usage in Python. 
+  coev_t::{A, X, Y, S} usage in Python. 
   
   bootstrap (_wrapper())
       A - NULL
       X - (in) pointer to boostrap function
       Y - (in) parameter of bootstrap function
+      S - NULL
       
   operation
       A - (in) switch()-ret-tuple or NULL in subsequent switches, 
       X - (in, A==NULL) exception type to raise, otherwise NULL
       Y - (in, A==NULL) exception value to raise, otherwise NULL
+      S - (in, A==NULL) exception traceback to use in raise, otherwise NULL
+      
+  death
+      A - callable ret-tuple or NULL if death is due to exception
+      X - (A==NULL) exception type to raise, NULL on normal return or SystemExit.
+      Y - (A==NULL) exception value to raise, NULL on normal return or SystemExit.
+      S - (A==NULL) exception traceback to use in raise, NULL on normal return or SystemExit.
+   
 **/
 
 static void /*** FIXME ***/
@@ -49,6 +58,10 @@ pY_FatalErrno(const char *msg, int e) {
 static time_t start_time;
 #ifdef Py_DEBUG
 #define tuco_dprintf(fmt, args...) _tuco_dprintf(fmt, ## args)
+#else
+#define tuco_dprintf(fmt, args...)
+#endif
+
 static int
 _tuco_dprintf(const char *fmt, ...) {
     va_list ap;
@@ -64,10 +77,7 @@ _tuco_dprintf(const char *fmt, ...) {
     errno = saved_errno;
     return rv;
 }
-#else
-#define tuco_dprintf(fmt, args...)
-#define _tuco_dprintf NULL
-#endif
+
 
 static coev_t coev_main;
 
@@ -105,14 +115,15 @@ PyThread__init_thread(void) {
  */
 typedef void (*func_t)(void *);
 static void 
-_wrapper(coev_t *p) {
+_wrapper(coev_t *c) {
     func_t func;
     void *arg;
-    func = ( func_t ) (p->X);
-    arg = p->Y;
-    p->A = NULL;
-    p->X = NULL;
-    p->Y = NULL;
+    func = ( func_t ) (c->X);
+    arg = c->Y;
+    c->A = NULL;
+    c->X = NULL;
+    c->Y = NULL;
+    c->S = NULL;
     func(arg);
 }
 
@@ -127,6 +138,7 @@ PyThread_start_new_thread(func_t func, void *arg) {
     c->A = NULL;
     c->X = func;
     c->Y = arg;
+    c->S = NULL;
     coev_schedule(c);
     return (long) c;
 }
@@ -144,6 +156,8 @@ PyThread_exit_thread(void) {
     return;
 }
 
+/* called last thing before t_boostrap returns control to _wrapper, 
+   which returns to coev_initialstub, and the coev_t is officially dead. */
 void
 PyThread__exit_thread(void) {
     return;

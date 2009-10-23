@@ -12,6 +12,10 @@
 
 #include "pythread.h"
 
+#ifdef UCOEV_THREADS
+#include <ucoev.h>
+#endif
+
 static PyObject *ThreadError;
 
 
@@ -424,6 +428,35 @@ t_bootstrap(void *boot_raw)
 	PyEval_AcquireThread(tstate);
 	res = PyEval_CallObjectWithKeywords(
 		boot->func, boot->args, boot->keyw);
+#ifdef UCOEV_THREADS
+        {
+        coev_t *subject;
+        subject = coev_current();
+        
+        if (res == NULL) {
+                subject->A = NULL;
+                if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+                        PyErr_Clear();
+                        subject->X = NULL;
+                        subject->Y = NULL;
+                        subject->S = NULL;
+                }
+                else {
+                        PyObject *type, *value, *traceback;
+                    
+                        PyErr_Fetch(&type, &value, &traceback);
+                        subject->X = type;
+                        subject->Y = value;
+                        subject->S = traceback;
+                }
+        }
+        else {
+                coev_t *subject;
+                subject = coev_current();
+                subject->A = res;
+        }
+        }
+#else
 	if (res == NULL) {
 		if (PyErr_ExceptionMatches(PyExc_SystemExit))
 			PyErr_Clear();
@@ -442,6 +475,7 @@ t_bootstrap(void *boot_raw)
 	}
 	else
 		Py_DECREF(res);
+#endif
 	Py_DECREF(boot->func);
 	Py_DECREF(boot->args);
 	Py_XDECREF(boot->keyw);
