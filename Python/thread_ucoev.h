@@ -57,22 +57,7 @@ pY_FatalErrno(const char *msg, int e) {
 }
 static time_t start_time;
 #ifdef Py_DEBUG
-#define tuco_dprintf(fmt, args...) _tuco_dprintf(fmt, ## args)
-static int
-_tuco_dprintf(const char *fmt, ...) {
-    va_list ap;
-    int rv, saved_errno;
-
-    saved_errno = errno;
-    fprintf(stderr, "[%d] ", (int) (time(NULL) - start_time));
-    va_start(ap, fmt);
-    rv = vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    fflush(stderr);
-    
-    errno = saved_errno;
-    return rv;
-}
+#define tuco_dprintf(fmt, args...) coev_dmprintf(fmt, ## args)
 #else
 #define tuco_dprintf(fmt, args...)
 #endif
