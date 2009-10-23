@@ -22,9 +22,12 @@ static int debug_flag;
 
 static time_t start_time;
 
-/* require Python >= 2.5 */
+/* require Python between 2.5 and 2.6 for the time being */
 #if (PY_VERSION_HEX < 0x02050000)
 #error Python version >= 2.5 is required.
+#endif
+#if (PY_VERSION_HEX >= 0x03000000)
+#error Python version < 3.0 is required.
 #endif
 
 /* define some 2.6 stuff that is missing from 2.5 */
@@ -81,6 +84,11 @@ static struct _exc_def {
         "unspecified coroutine error"
     },
     {
+        &PyExc_CoroExit, &PyExc_Exception,
+        "coev.Exit", "Exit",
+        "child coroutine was forced to exit"
+    },
+    {
         &PyExc_CoroWaitAbort, &PyExc_CoroError,
         "coev.WaitAbort", "WaitAbort",
         "unscheduled switch into waiting or sleeping coroutine (unused as of now)"
@@ -135,30 +143,31 @@ _coro_dprintf(const char *fmt, ...) {
 #define coro_dprintf(fmt, args...) do { if (debug_flag) \
     _coro_dprintf(fmt, ## args); } while(0)
 
+static PyObject *mod_switch_bottom_half(coev_t *target);
+
 PyDoc_STRVAR(mod_switch_doc,
-"switch(*args)\n\
+"switch(thread_id, *args)\n\
 \n\
-Switch execution to this coroutine.\n\
+Switch execution to coroutine identified by thread_id.\n\
 \n\
-If this coroutine has never been run, then this coroutine\n\
-will be switched to using the body of self.run(*args).\n\
+If this coroutine has never been run, then it will\n\
+start execution.\n\
 \n\
 If the coroutine is active (has been run, but was switch()'ed\n\
-out before leaving its run function), then this coroutine will\n\
-be resumed and the return value to its switch call will be\n\
-None if no arguments are given, the given argument if one\n\
-argument is given, or the args tuple if multiple arguments\n\
-are given\n\
+out before leaving its run function), then it will be resumed\n\
+and the return value of its switch call will be:\n\
+ - None if no arguments are passed\n\
+ - the given argument if is single\n\
+ - a tuple if multiple arguments are passed\n\
 \n\
-If the coroutine is dead, or is the current coroutine then this\n\
-function will simply return the args using the same rules as\n\
-above.");
+If the coroutine is dead, or is the current coroutine, appropriate\n\
+exception is raised.");
 
 static PyObject* 
 mod_switch(PyObject *a, PyObject* args) {
-    PyObject *arg = Py_None, *result;
+    PyObject *arg = Py_None;
     long target_id;
-    coev_t *target, *dead_meat, *self;
+    coev_t *target;
     
     if (!PyArg_ParseTuple(args, "l|O", &target_id, &arg))
 	return NULL;
@@ -166,16 +175,24 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
     target = (coev_t *) target_id;
     
     /* Release old arg, put new one in place. */
-    /* On initial run it is NULL, and gets clobbered
-       by switch value on next switch to coroutine. */
     Py_CLEAR(target->A);
     Py_INCREF(arg);
     target->A = arg;
-    
-    /* switch into this object. */
+
     coro_dprintf("coro_switch: current [%s] target [%s] arg %p \n", 
         coev_treepos(coev_current()),
         coev_treepos(target), arg);
+    
+    return mod_switch_bottom_half(target);
+}
+
+/* lower part common to mod_switch() and mod_throw() */
+static PyObject *
+mod_switch_bottom_half(coev_t *target) {
+    PyObject *result;
+    
+    coev_t *dead_meat = NULL, *self;
+    /* switch into this object. */
     
     Py_BEGIN_ALLOW_THREADS
     coev_switch(target);
@@ -194,29 +211,42 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
         coev_treepos(self->origin), coev_state(self->origin));
     
     switch (self->status) {
-        case CSW_VOLUNTARY:
-            if (self->A != NULL) {
-                /* regular switch */
-                result = self->A;
-                self->A = NULL; /* steal reference */
-                return result;
-            } else {
-                /* exception injection */
-                if (!self->X) 
-                    Py_FatalError("Exception injection, but no exception set.");
-                PyErr_SetObject(self->X, self->Y);
-                self->X = self->Y = NULL; 
-                return NULL;
-            }
         case CSW_SIGCHLD:
             /*  */
             dead_meat = self->origin;
             if (dead_meat->state != CSTATE_DEAD)
                 Py_FatalError("CSW_SIGCHLD, but dead_meat->state != CSTATE_DEAD");
             Py_CLEAR(self->A);
-            Py_CLEAR(dead_meat->A);
-
-            Py_RETURN_NONE;
+            self->A = dead_meat->A;
+            self->X = dead_meat->X;
+            self->Y = dead_meat->Y;
+            self->S = dead_meat->S;
+            
+        case CSW_VOLUNTARY:
+            if (self->A != NULL) {
+                /* regular switch or normal return */
+                result = self->A;
+                self->A = NULL; /* steal reference */
+                return result;
+            } else {
+                /* exception injection or uncaught exception */
+                if (self->X == NULL) {
+                    /* exit was forced.*/
+                    PyObject *thread_id;
+                    if (dead_meat == NULL)
+                        Py_FatalError("death by SystemExit, but origin not set.\n");
+                    
+                    /* thread-id convention is used here. */
+                    thread_id = PyInt_FromLong((long)dead_meat);
+                    PyErr_SetObject(PyExc_CoroExit, thread_id);
+                    Py_DECREF(thread_id);
+                    return NULL;
+                } else {
+                    PyErr_Restore(self->X, self->Y, self->S);
+                }
+                self->X = self->Y = self->S = NULL; 
+                return NULL;
+            }
             
         case CSW_SCHEDULER_NEEDED:
             Py_CLEAR(self->A);
@@ -240,14 +270,11 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
             return NULL;
     }
 }
-#if 0
+
 PyDoc_STRVAR(mod_throw_doc,
 "throw(id, typ[,val[,tb]]) -> raise exception in coroutine, return value passed "
 "when switching back");
-/** this basically switches to a coroutine with A=NULL, X=type Y=value
-    per Python conventions return of NULL from C extension
-    function means an exception. Throwing tracebacks around is not su
-*/
+/** This switches to a coroutine with A=NULL, X=type Y=value S=traceback. */
 static PyObject* 
 mod_throw(PyObject *a, PyObject* args) {
     long target_id;
@@ -256,14 +283,20 @@ mod_throw(PyObject *a, PyObject* args) {
     PyObject *val = NULL;
     PyObject *tb = NULL;
        
-    if (!PyArg_ParseTuple(args, "l|OO:throw", &target_id, &typ, &val))
+    if (!PyArg_ParseTuple(args, "l|OOO:throw", &target_id, &typ, &val, &tb))
         return NULL;
 
     target = (coev_t *) target_id;
     
     Py_INCREF(typ);
     Py_XINCREF(val);
+    Py_XINCREF(tb);
 
+    coro_dprintf("coro_throw: current [%s] target [%s]\n", 
+        coev_treepos(coev_current()),
+        coev_treepos(target));
+
+    
     if (PyExceptionClass_Check(typ)) {
         PyErr_NormalizeException(&typ, &val, &tb);
     } else if (PyExceptionInstance_Check(typ)) {
@@ -287,11 +320,12 @@ mod_throw(PyObject *a, PyObject* args) {
         goto failed_throw;
     }
 
-    target->A = NULL;
+    Py_CLEAR(target->A);
     target->X = typ;
     target->Y = val;
+    target->S = tb;
     
-    return mod_switch(target, NULL);
+    return mod_switch_bottom_half(target);
 
 failed_throw:
     /* Didn't use our arguments, so restore their original refcounts */
@@ -299,7 +333,7 @@ failed_throw:
     Py_XDECREF(val);
     return NULL;
 }
-#endif
+
 
 PyDoc_STRVAR(mod_getpos_doc,
 "getpos([id]) -> str \n\
@@ -371,10 +405,7 @@ socketfile_dealloc(CoroSocketFile *self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject *
-mod_wait_bottom_half(void);
-
-
+static PyObject *mod_wait_bottom_half(void);
 static PyObject *sf_empty_string = NULL;
 
 #define RETURN_EMPTYSTRING_IF(cond) do { if((cond)) { Py_INCREF(sf_empty_string); return sf_empty_string; } } while (0)
@@ -806,7 +837,7 @@ mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {
 static PyMethodDef CoevMethods[] = {
     {   "current", (PyCFunction)mod_current, METH_NOARGS, mod_current_doc },
     {   "switch", (PyCFunction)mod_switch, METH_VARARGS, mod_switch_doc },
-/*    {   "throw", (PyCFunction)mod_throw, METH_VARARGS, mod_throw_doc }, */
+    {   "throw", (PyCFunction)mod_throw, METH_VARARGS, mod_throw_doc },
     {   "wait", (PyCFunction)mod_wait, METH_VARARGS, mod_wait_doc },
     {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS, mod_sleep_doc },
 /*    {   "stall", (PyCFunction)mod_stall, METH_VARARGS, mod_stall_doc }, */
