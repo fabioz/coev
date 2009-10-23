@@ -106,7 +106,7 @@ struct _coev {
     cokeychain_t kc;      /* CLS keychain */
     cokeychain_t *kc_tail; /* CLS meta-keychain tail (if it was ever extended) */
     
-    void *A, *X, *Y;  /* user-used stuff so that them don't need to fiddle with offsetof (6502 ftw) */
+    void *A, *X, *Y, *S;  /* user-used stuff so that them don't need to fiddle with offsetof (6502 ftw) */
     
 #ifdef THREADING_MADNESS
     pthread_t thread;

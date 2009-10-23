@@ -551,7 +551,7 @@ _coev_dump(char *m, coev_t *c) {
             "    is_sched:   %d\n"
             "    parent:     %p\n"
             "    run:        %p\n"
-	    "    A: %p X: %p Y: %p\n"
+	    "    A: %p X: %p Y: %p S: %p\n"
 	    "    io watcher  active=%d pending=%d\n"
             "    io timeout  active=%d pending=%d\n"
             "    sleep timer active=%d pending=%d\n",
@@ -563,7 +563,7 @@ _coev_dump(char *m, coev_t *c) {
         c == ts_scheduler.scheduler,
         c->parent,
         c->run,
-	c->A, c->X, c->Y,
+	c->A, c->X, c->Y, c->S,
         ev_is_active(&c->watcher), ev_is_pending(&c->watcher),
         ev_is_active(&c->io_timer), ev_is_pending(&c->io_timer),
         ev_is_active(&c->sleep_timer), ev_is_pending(&c->sleep_timer)
