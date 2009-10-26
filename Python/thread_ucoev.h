@@ -14,7 +14,9 @@
             Thread id is (long)(coev_t *).
         4. deallocation of coev_t structures is done in 
            modcoev's mod_wait_bottom_half, not here.
-           
+        5. it does not allow finalization of the library
+           in any clean way.
+        
         It's ugly. Had to patch threadmodule.c :(.
 
   coev_t::{A, X, Y, S} usage in Python. 
@@ -71,9 +73,9 @@ static coev_t coev_main;
 
 static
 coev_frameth_t _cmf = {
-    malloc,    /* malloc */ 
-    realloc,   /* realloc */
-    free,      /* free */
+    malloc,                     /* malloc */ 
+    realloc,                    /* realloc */
+    free,                       /* free */
     Py_FatalError,              /* abort */
     pY_FatalErrno,              /* abort with errno */
     python_augmented_inthdlr,   /* unloop at SIGINT */
