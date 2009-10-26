@@ -57,6 +57,10 @@ coev_dmprintf(const char *fmt, ...) {
     int rv, saved_errno;
     struct timeval tv, delta;
     
+    /* ignore messages before initialization/after finalization */
+    if (dmesg == NULL) 
+        return;
+    
     saved_errno = errno;
     
     gettimeofday(&tv, NULL);
@@ -82,6 +86,12 @@ coev_dmprintf(const char *fmt, ...) {
     else
         flush_dmesg();
     errno = saved_errno;
+}
+
+void
+coev_dmflush(void) {
+    _fm.dm_flush(dmesg, dm_cp - dmesg);
+    dm_cp = dmesg;
 }
 
 #define cgen_dprintf(t, fmt, args...) do { if (_fm.debug & t) \
@@ -1906,13 +1916,14 @@ coev_libfini(void) {
     /* should do something good here. */
     if (ts_current != ts_root)
 	_fm.abort("coev_libfini() must be called only in root coro.");
-	
+    coev_dprintf("coev_libfini(): bye bye");
     colock_bunch_fini(ts_rootlockbunch);
     cls_keychain_fini(ts_current->kc.next);
     _free_stacks(); /* this effectively kills all coroutines, unbeknowst to them. */
     _free_coevs(); /* yep. worse than the above. */
     _fm.dm_flush(dmesg, dm_cp - dmesg); /* dump whatever's left in the dmesg buffer */
     _fm.free(dmesg);
+    dmesg = NULL;
 }
 
 void coev_fork_notify(void) {

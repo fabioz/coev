@@ -361,6 +361,7 @@ void coev_getstats(uint64_t *ary);
 
 void coev_setdebug(int flagsmask);
 void coev_dmprintf(const char *, ...);
+void coev_dmflush(void);
 
 
 #ifdef __cplusplus
