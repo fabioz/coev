@@ -1549,6 +1549,9 @@ sf_reshuffle_buffer(cnrbuf_t *self, ssize_t needed) {
 ssize_t 
 cnrbuf_read(cnrbuf_t *self, void **p, ssize_t sizehint) {
     ssize_t rv, readen, to_read;
+
+    cnrb_dprintf("cnrbuf_read(): fd=%d sizehint %zd bytes buflimit %zd bytes errno=%d\n", 
+        self->fd, sizehint, self->in_limit, self->err_no);
     
     if (self->owner && (self->owner != ts_current)) {
         errno = EBUSY;
@@ -1561,10 +1564,7 @@ cnrbuf_read(cnrbuf_t *self, void **p, ssize_t sizehint) {
         errno = self->err_no;
         return -1;
     }
-    
-    cnrb_dprintf("cnrbuf_read(): fd=%d sizehint %zd bytes buflimit %zd bytes\n", 
-        self->fd, sizehint, self->in_limit);
-    
+        
     if (sizehint > self->in_limit)
         self->in_limit = sizehint;
 
@@ -1693,6 +1693,9 @@ sf_extract_line(cnrbuf_t *self, const char *startfrom, void **p, ssize_t sizehin
 ssize_t 
 cnrbuf_readline(cnrbuf_t *self, void **p, ssize_t sizehint) {
     ssize_t rv, to_read, readen;
+
+    cnrb_dprintf("cnrbuf_readline(): fd=%d sizehint %zd bytes buflimit %zd bytes errno=%d\n", 
+        self->fd, sizehint, self->in_limit, self->err_no);
     
     if ((self->err_no != 0) && (self->in_used == 0)) {
         /* we had error, but returned buffer 
@@ -1700,9 +1703,6 @@ cnrbuf_readline(cnrbuf_t *self, void **p, ssize_t sizehint) {
         errno = self->err_no;
         return -1;
     }
-    
-    cnrb_dprintf("cnrbuf_readline(): fd=%d sizehint %zd bytes buflimit %zd bytes\n", 
-        self->fd, sizehint, self->in_limit);
     
     if (sizehint > self->in_limit)
         self->in_limit = sizehint;
@@ -1746,21 +1746,21 @@ rerecv:
 	    if (errno == EAGAIN) {
 		coev_wait(self->fd, COEV_READ, self->iop_timeout);
                 if (ts_current->status == CSW_EVENT) {
-                    cnrb_dprintf("cnrbuf_readline: CSW_EVENT after wait, continuing\n");
+                    cnrb_dprintf("cnrbuf_readline(): CSW_EVENT after wait, continuing\n");
                     goto rerecv;
                 }
                 
 		if (ts_current->status == CSW_TIMEOUT)
                     self->err_no = ETIMEDOUT;
                 else
-                    _fm.abort("cnrbuf_read(): unpossible status after wait");
+                    _fm.abort("cnrbuf_readline(): unpossible status after wait");
             } else {
                 self->err_no = errno;
             }
 	}
 
     } while(readen > 0);
-    cnrb_dprintf("cnrbuf_readline: readen==0\n");
+    cnrb_dprintf("cnrbuf_readline: readen==%d, errno=%d\n", readen, self->err_no);
     
     /* error and no data to return */
     if ((self->in_used == 0) && (self->err_no != 0)) {
