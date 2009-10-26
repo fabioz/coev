@@ -467,21 +467,22 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
             (port, protocol, port)
     else:
         print "serving on %s://%s:%s" % (protocol, host, port)
-    try:
-        server.bind()
-        server.serve()
-    except KeyboardInterrupt:
-        # allow CTRL+C to shutdown
-        pass
-    finally:
-        server.unbind()
+    
+    def rim(server):
+        try:
+            server.bind()
+            print "bound"
+            server.serve()
+            print "served"
+        except KeyboardInterrupt:
+            # allow CTRL+C to shutdown
+            pass
+        finally:
+            server.unbind()
+            print "unbound"
 
-def thunk(app, args):
-    try:
-        serve(app, **args)
-    except Exception, e:
-        print "aborting"
-        sys.exit(0)
+    thread.start_new_thread(rim, (server,))
+    coev.scheduler()
 
 
 # For paste.deploy server instantiation (egg:Egste#http)
@@ -489,7 +490,7 @@ def thunk(app, args):
 # arguments (though that's not much of an issue yet, ever?)
 def server_runner(wsgi_app, global_conf, **kwargs):
     sys.setcheckinterval(10000000)
-    
+
     from paste.deploy.converters import asbool
     for name in ['port', 'socket_timeout']:
         if name in kwargs:
@@ -498,20 +499,42 @@ def server_runner(wsgi_app, global_conf, **kwargs):
         and 'error_email' in global_conf):
         kwargs['error_email'] = global_conf['error_email']
     
-    server = thread.start_new_thread(thunk, (wsgi_app, kwargs))
-    coev.scheduler()
+    
 
 
 if __name__ == '__main__':
+    
     sys.setcheckinterval(10000000)
     coev.setdebug(True, coev.CDF_COEV | coev.CDF_COEV_DUMP |coev.CDF_RUNQ_DUMP | coev.CDF_NBUF)
     #coev.setdebug(False, 0)
     #coev.setdebug(True, 0xf | coev.CDF_NBUF)
     sys.excepthook = sys.__excepthook__
-    from paste.wsgilib import dump_environ
+    def dump_environ(environ, start_response):
+        """
+        Application which simply dumps the current environment
+        variables out as a plain text response.
+        Ripped out of paste.wsgilib for the following reasonos:
+        sick of patching '0' in content-length every single time.
+        """
+        output = []
+        keys = environ.keys()
+        keys.sort()
+        for k in keys:
+            v = str(environ[k]).replace("\n","\n    ")
+            output.append("%s: %s\n" % (k, v))
+        output.append("\n")
+        content_length = environ.get("CONTENT_LENGTH", '0')
+        if int(content_length):
+            output.append(environ['wsgi.input'].read(int(content_length)))
+            output.append("\n")
+        output = "".join(output)
+        headers = [('Content-Type', 'text/plain'),
+                   ('Content-Length', str(len(output)))]
+        start_response("200 OK", headers)
+        return [output]
+
     kwargs = { 'server_version': "Wombles/1.0", 'protocol_version': "HTTP/1.1", 'port': "8888" }
 
-    server = thread.start_new_thread(thunk, (dump_environ, kwargs))
-    coev.scheduler()
+    serve(dump_environ, **kwargs)
     
     
