@@ -383,11 +383,6 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
           use_threadpool=None, threadpool_workers=10,
           threadpool_options=None, request_queue_size=10, response_timeout=42.23):
           
-    assert not handler, "foreign handlers are prohibited"
-    assert not ssl_context, "SSL/TLS not supported"
-    assert not ssl_pem, "SSL/TLS not supported"
-    assert not use_threadpool, "threads are evil"
-    #assert converters.asbool(start_loop), "WTF?"
     """
     Serves your ``application`` over HTTP via WSGI interface
 
@@ -438,6 +433,12 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
         more closely.
 
     """
+    assert not handler, "foreign handlers are prohibited"
+    assert not ssl_context, "SSL/TLS not supported"
+    assert not ssl_pem, "SSL/TLS not supported"
+    assert not use_threadpool, "threads are evil"
+    #assert converters.asbool(start_loop), "WTF?"
+    sys.setcheckinterval(10000000)
 
     host = host or '127.0.0.1'
     if not port:
@@ -471,26 +472,21 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
     def rim(server):
         try:
             server.bind()
-            print "bound"
             server.serve()
-            print "served"
         except KeyboardInterrupt:
             # allow CTRL+C to shutdown
             pass
         finally:
             server.unbind()
-            print "unbound"
 
     thread.start_new_thread(rim, (server,))
     coev.scheduler()
 
 
-# For paste.deploy server instantiation (egg:Egste#http)
+# For paste.deploy server instantiation (egg:coewsgi#http)
 # Note: this gets a separate function because it has to expect string
 # arguments (though that's not much of an issue yet, ever?)
 def server_runner(wsgi_app, global_conf, **kwargs):
-    sys.setcheckinterval(10000000)
-
     from paste.deploy.converters import asbool
     for name in ['port', 'socket_timeout']:
         if name in kwargs:
@@ -499,6 +495,7 @@ def server_runner(wsgi_app, global_conf, **kwargs):
         and 'error_email' in global_conf):
         kwargs['error_email'] = global_conf['error_email']
     
+    serve(wsgi_app, **kwargs)
     
 
 
