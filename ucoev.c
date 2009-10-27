@@ -1313,7 +1313,6 @@ colock_acquire(colock_t *p, int wf) {
         if (wf == 0)
             return 0;
         
-	_fm.abort("haha busy-wait");
 	coev_stall();
     }
     p->owner = (coev_t *)ts_current;
