@@ -45,7 +45,7 @@ static struct timeval started_at;
 
 static void
 flush_dmesg(void) {
-    if (dm_cp - dmesg < 1024) {
+    if ( (_fm.dm_size - (dm_cp - dmesg)) < 1024) {
         _fm.dm_flush(dmesg, dm_cp - dmesg);
         dm_cp = dmesg;
     }
