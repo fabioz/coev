@@ -47,6 +47,7 @@ static void
 flush_dmesg(void) {
     if ( (_fm.dm_size - (dm_cp - dmesg)) < 1024) {
         _fm.dm_flush(dmesg, dm_cp - dmesg);
+        memset(dmesg, 0, _fm.dm_size);
         dm_cp = dmesg;
     }
 }
@@ -749,8 +750,7 @@ coev_initialstub(void) {
     
     /* find switchable target by ignoring dead and busy coroutines */
     while (    (parent != NULL)
-            && (parent->state != CSTATE_RUNNABLE)
-            && (parent->state != CSTATE_SCHEDULED) )
+            && (parent->state != CSTATE_RUNNABLE) )
         parent = parent->parent;
 
     if (!parent) {
@@ -760,10 +760,6 @@ coev_initialstub(void) {
         else
             _fm.abort("coev_initialstub(): absolutely no one to cede control to.");
     }
-    
-    /* that's it. */
-    if (parent->state == CSTATE_SCHEDULED)
-        coev_runq_remove(parent);
     
     parent->state  = CSTATE_CURRENT;
     parent->status = CSW_SIGCHLD;
