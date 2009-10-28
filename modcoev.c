@@ -130,7 +130,7 @@ static struct _exc_def {
 #define coro_dprintf(fmt, args...) do { if (debug_flag) \
     coev_dmprintf(fmt, ## args); } while(0)
 
-static PyObject *mod_switch_bottom_half(coev_t *target);
+static PyObject *mod_switch_bottom_half(void);
 
 PyDoc_STRVAR(mod_switch_doc,
 "switch(thread_id, *args)\n\
@@ -169,21 +169,20 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
     coro_dprintf("coro_switch: current [%s] target [%s] arg %p \n", 
         coev_treepos(coev_current()),
         coev_treepos(target), arg);
-    
-    return mod_switch_bottom_half(target);
-}
 
-/* lower part common to mod_switch() and mod_throw() */
-static PyObject *
-mod_switch_bottom_half(coev_t *target) {
-    PyObject *result;
-    
-    coev_t *dead_meat = NULL, *self;
-    /* switch into this object. */
-    
     Py_BEGIN_ALLOW_THREADS
     coev_switch(target);
     Py_END_ALLOW_THREADS
+    
+    return mod_switch_bottom_half();
+}
+
+/* lower part common to mod_switch(),mod_throw(),mod_join(), mod_stall() */
+static PyObject *
+mod_switch_bottom_half(void) {
+    PyObject *result;
+    
+    coev_t *dead_meat = NULL, *self;
     
     self = coev_current();
     
@@ -312,13 +311,67 @@ mod_throw(PyObject *a, PyObject* args) {
     target->Y = val;
     target->S = tb;
     
-    return mod_switch_bottom_half(target);
+    Py_BEGIN_ALLOW_THREADS
+    coev_switch(target);
+    Py_END_ALLOW_THREADS
+    
+    return mod_switch_bottom_half();
 
 failed_throw:
     /* Didn't use our arguments, so restore their original refcounts */
     Py_DECREF(typ);
     Py_XDECREF(val);
     return NULL;
+}
+
+PyDoc_STRVAR(mod_join_doc,
+"switch(thread_id, *args)\n\
+\n\
+Await for execution of given coroutine to cease, pass on return any values returned.\n\
+Switches to the scheduler, or to the coro in question in scheduler's absence.\n\
+");
+
+static PyObject* 
+mod_join(PyObject *a, PyObject* args) {
+    long target_id;
+    coev_t *target;
+    
+    if (!PyArg_ParseTuple(args, "l", &target_id))
+	return NULL;
+
+    target = (coev_t *) target_id;
+    
+    coro_dprintf("coro_join: current [%s] target [%s]\n", 
+        coev_treepos(coev_current()),
+        coev_treepos(target));
+    
+    Py_BEGIN_ALLOW_THREADS
+    coev_join(target);
+    Py_END_ALLOW_THREADS
+    
+    return mod_switch_bottom_half();
+}
+
+PyDoc_STRVAR(mod_stall_doc,
+"stall()\n\
+\n\
+Stall execution of current coroutine until next runqueue pass.\n\
+");
+
+static PyObject* 
+mod_stall(PyObject *a, PyObject* args) {
+    coro_dprintf("coev.stall(): current [%s]\n", 
+        coev_treepos(coev_current()));
+
+    Py_BEGIN_ALLOW_THREADS
+    coev_stall();
+    Py_END_ALLOW_THREADS
+    
+    if (coev_current()->status == CSW_SCHEDULER_NEEDED) {
+        PyErr_SetNone(PyExc_CoroNoScheduler);
+        return NULL;
+    }
+    return mod_switch_bottom_half();
 }
 
 
@@ -825,9 +878,10 @@ static PyMethodDef CoevMethods[] = {
     {   "current", (PyCFunction)mod_current, METH_NOARGS, mod_current_doc },
     {   "switch", (PyCFunction)mod_switch, METH_VARARGS, mod_switch_doc },
     {   "throw", (PyCFunction)mod_throw, METH_VARARGS, mod_throw_doc },
+    {   "join", (PyCFunction)mod_join, METH_VARARGS, mod_join_doc },
     {   "wait", (PyCFunction)mod_wait, METH_VARARGS, mod_wait_doc },
     {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS, mod_sleep_doc },
-/*    {   "stall", (PyCFunction)mod_stall, METH_VARARGS, mod_stall_doc }, */
+    {   "stall", (PyCFunction)mod_stall, METH_VARARGS, mod_stall_doc },
     {   "schedule", (PyCFunction)mod_schedule, METH_VARARGS, mod_schedule_doc},
     {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS, mod_scheduler_doc },
     {   "stats", (PyCFunction)mod_stats, METH_NOARGS, mod_stats_doc },
