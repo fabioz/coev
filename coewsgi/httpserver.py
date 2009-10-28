@@ -502,8 +502,8 @@ def server_runner(wsgi_app, global_conf, **kwargs):
 if __name__ == '__main__':
     
     sys.setcheckinterval(10000000)
-    coev.setdebug(True, coev.CDF_COEV | coev.CDF_COEV_DUMP |coev.CDF_RUNQ_DUMP | coev.CDF_NBUF)
-    #coev.setdebug(False, 0)
+    #coev.setdebug(True, coev.CDF_COEV | coev.CDF_COEV_DUMP |coev.CDF_RUNQ_DUMP | coev.CDF_NBUF)
+    coev.setdebug(False, 0)
     #coev.setdebug(True, 0xf | coev.CDF_NBUF)
     sys.excepthook = sys.__excepthook__
     def dump_environ(environ, start_response):
@@ -531,7 +531,8 @@ if __name__ == '__main__':
         return [output]
 
     kwargs = { 'server_version': "Wombles/1.0", 'protocol_version': "HTTP/1.1", 'port': "8888" }
-
+    kwargs['host'] = sys.argv[1]
+    kwargs['port'] = sys.argv[2]
     serve(dump_environ, **kwargs)
     
     
