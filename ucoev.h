@@ -110,6 +110,8 @@ struct _coev {
     cokeychain_t kc;      /* CLS keychain */
     cokeychain_t *kc_tail; /* CLS meta-keychain tail (if it was ever extended) */
     
+    int being_joined;  /* if someone waits on us */
+    
     void *A, *X, *Y, *S;  /* user-used stuff so that them don't need to fiddle with offsetof (6502 ftw) */
     
 #ifdef THREADING_MADNESS
@@ -257,6 +259,9 @@ int coev_schedule(coev_t *waiter);
    returns 0 on success, CSCHED_* on error */
 int coev_stall(void);
 
+/* ensure switchback will only occur after given coro exits, and will be from it */
+void coev_join(coev_t *);
+
 /* must be called for IO scheduling to begin. 
    returns current scheduler and does nothing if there is one running. 
    returns NULL after runqueue and I/O waiters are exhausted. */
@@ -265,7 +270,6 @@ coev_t *coev_loop(void);
 /* can be called anywhere to stop and return from the coev_loop().
 does not perform a switch to scheduler. */
 void coev_unloop(void);
-
 
 /*  Locking implemented only to satisfy Python's current 
     threading model. Design criticism is devnulled. 

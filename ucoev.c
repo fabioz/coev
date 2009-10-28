@@ -448,6 +448,7 @@ coev_init_root(coev_t *root) {
     root->lq_next = NULL;
     root->lq_prev = NULL;
     root->child_count = 0;
+    root->being_joined = 0;
     
     ev_init(&root->watcher, io_callback);
     ev_timer_init(&root->io_timer, iotimeout_callback, 23., 42.);
@@ -505,6 +506,7 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->rq_next = NULL;
     child->lq_next = NULL;
     child->lq_prev = NULL;
+    child->being_joined = 0;
 
     {
         cokeychain_t *kc = &child->kc;
@@ -756,17 +758,21 @@ coev_initialstub(void) {
     /* release resources */
     parent = _coev_sweep(self);
     
-    /* find switchable target by ignoring dead and busy coroutines */
-    while (    (parent != NULL)
-            && (parent->state != CSTATE_RUNNABLE) )
-        parent = parent->parent;
+    if (ts_scheduler.scheduler && ( !(self->being_joined))) {
+        parent = ts_scheduler.scheduler;
+    } else {    
+        /* find switchable target by ignoring dead and busy coroutines */
+        while (    (parent != NULL)
+                && (parent->state != CSTATE_RUNNABLE) )
+            parent = parent->parent;
 
-    if (!parent) {
-        if (ts_scheduler.scheduler && (ts_scheduler.scheduler->state == CSTATE_RUNNABLE) )
-            /* here if scheduler is in another branch AND root is not RUNNABLE/SCHEDULED. */
-            parent = ts_scheduler.scheduler;
-        else
-            _fm.abort("coev_initialstub(): absolutely no one to cede control to.");
+        if (!parent) {
+            if (ts_scheduler.scheduler && (ts_scheduler.scheduler->state == CSTATE_RUNNABLE) )
+                /* here if scheduler is in another branch AND root is not RUNNABLE/SCHEDULED. */
+                parent = ts_scheduler.scheduler;
+            else
+                _fm.abort("coev_initialstub(): absolutely no one to cede control to.");
+        }
     }
     
     parent->state  = CSTATE_CURRENT;
@@ -1332,8 +1338,9 @@ colock_acquire(colock_t *p, int wf) {
         if (!p->queue_tail)
             p->queue_tail = ts_current;
         
-        /* switch somewhere */  
+        /* switch somewhere */
         ts_current->state = CSTATE_LOCKWAIT;
+        ts_current->status = CSW_VOLUNTARY;
 	if (ts_scheduler.scheduler)
             coev_switch(ts_scheduler.scheduler);
         else
@@ -1883,6 +1890,18 @@ coev_setparent(coev_t *target, coev_t *newparent) {
     target->parent = newparent;
     update_treepos(target);
     return 0;
+}
+
+void
+coev_join(coev_t *target) {
+    coev_setparent(target, (coev_t *)ts_current);
+    target->being_joined = 1;
+    ts_current->state = CSTATE_RUNNABLE;
+    ts_current->status = CSW_VOLUNTARY;    
+    if (ts_scheduler.scheduler)
+        coev_switch(ts_scheduler.scheduler);
+    else
+        coev_switch(target);
 }
 
 void 
