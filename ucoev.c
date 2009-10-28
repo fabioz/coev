@@ -134,6 +134,8 @@ struct _coev_lock_bunch {
 struct _coev_lock {
     colock_t *next;
     coev_t *owner;
+    coev_t *queue_head;
+    coev_t *queue_tail;
     colbunch_t *bunch;
     int count;
 };
@@ -443,6 +445,8 @@ coev_init_root(coev_t *root) {
     root->state = CSTATE_CURRENT;
     root->status = CSW_NONE;
     root->rq_next = NULL;
+    root->lq_next = NULL;
+    root->lq_prev = NULL;
     root->child_count = 0;
     
     ev_init(&root->watcher, io_callback);
@@ -499,6 +503,9 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->state = CSTATE_RUNNABLE;
     child->status = CSW_NONE;
     child->rq_next = NULL;
+    child->lq_next = NULL;
+    child->lq_prev = NULL;
+
     {
         cokeychain_t *kc = &child->kc;
         cls_keychain_init(&kc);
@@ -565,6 +572,7 @@ str_coev_state[] = {
     "SCHEDULED",
     "IOWAIT   ",
     "SLEEP    ",
+    "LOCKWAIT ",
     "DEAD     ",
     0
 };
@@ -1248,6 +1256,8 @@ colock_allocate(void) {
     lock->next = bunch->used;
     bunch->used = lock;
     lock->owner = NULL;
+    lock->queue_head = NULL;
+    lock->queue_tail = NULL;
 
     colo_dprintf("colock_allocate(): [%s] allocates %p\n", ts_current->treepos, lock);
     colo_dump(ts_rootlockbunch);
@@ -1259,8 +1269,8 @@ colock_free(colock_t *lock) {
     colock_t *prev;
     colbunch_t *bunch = lock->bunch;
     
-    lock->owner = NULL; 
-    
+    lock->owner = NULL;
+        
     colo_dprintf("colock_free(%p): [%s] deallocates [%s]'s %p (of bunch %p)\n", lock, ts_current->treepos, 
         lock->owner != NULL ? lock->owner->treepos : "(nil)",  lock, bunch);
     
@@ -1313,7 +1323,21 @@ colock_acquire(colock_t *p, int wf) {
         if (wf == 0)
             return 0;
         
-	coev_stall();
+        /* put curcoro into the FIFO from one end. */
+        ts_current->lq_prev = NULL;
+        if (p->queue_head)
+            p->queue_head->lq_next = p->queue_head;
+        ts_current->lq_next = p->queue_head;
+        p->queue_head = ts_current;
+        if (!p->queue_tail)
+            p->queue_tail = ts_current;
+        
+        /* switch somewhere */  
+        ts_current->state = CSTATE_LOCKWAIT;
+	if (ts_scheduler.scheduler)
+            coev_switch(ts_scheduler.scheduler);
+        else
+            coev_switch(p->owner);
     }
     p->owner = (coev_t *)ts_current;
     p->count = 1;
@@ -1326,7 +1350,7 @@ void
 colock_release(colock_t *p) {
     if (p->count == 0)
         colo_dprintf("colock_release(%p): [%s] releases a lock that has no owner\n", p, ts_current->treepos);
-    if (p->count >0)
+    if (p->count > 0)
         p->count--;
     if (p->owner != ts_current)
         colo_dprintf("colock_release(%p): [%s] releases lock that was acquired by [%s], new count=%d\n", 
@@ -1336,6 +1360,14 @@ colock_release(colock_t *p) {
             p, ts_current->treepos, p->count);
     if (p->count == 0)
         p->owner = NULL;
+    
+    if (p->queue_tail) {
+        coev_t *lucky = p->queue_tail;
+        p->queue_tail = p->queue_tail->lq_prev;
+        if (lucky == p->queue_head)
+            p->queue_head = NULL;
+        coev_schedule(lucky);
+    }
 }
 
 /*  Coroutine-local storage is designed to satisfy perverse semantics 

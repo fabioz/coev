@@ -29,7 +29,8 @@ extern "C" {
 #define CSTATE_SCHEDULED     3 /* in runqueue */
 #define CSTATE_IOWAIT        4 /* waiting on an fd */
 #define CSTATE_SLEEP         5 /* sleeping */
-#define CSTATE_DEAD          6 /* dead */
+#define CSTATE_LOCKWAIT      6 /* waiting on a lock */
+#define CSTATE_DEAD          7 /* dead */
 
 /* coev_t::status */
 #define CSW_NONE             0 /* there was no switch */
@@ -102,6 +103,9 @@ struct _coev {
     coev_t *rq_next;         /* runqueue list pointer */
     coev_t *cb_next;   /* allocator internals */
     coev_t *cb_prev;   /* allocator internals */
+    
+    coev_t *lq_next;  /* lock waiting queue */
+    coev_t *lq_prev;  /* lock waiting queue */
     
     cokeychain_t kc;      /* CLS keychain */
     cokeychain_t *kc_tail; /* CLS meta-keychain tail (if it was ever extended) */
