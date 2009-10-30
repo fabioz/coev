@@ -1,7 +1,0 @@
-
-syntax: regexp
-^build$
-syntax: regexp
-^coev\.egg-info$
-syntax: regexp
-^dist$
