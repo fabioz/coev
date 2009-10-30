@@ -1,5 +1,0 @@
-
-syntax: regexp
-^libucoev\.so$
-^ucoev\.o$
-
