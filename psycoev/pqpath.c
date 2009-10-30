@@ -702,10 +702,12 @@ pq_close(connectionObject *conn) {
     closer->A = conn;
     coev_schedule(closer);
     
+    Py_BEGIN_ALLOW_THREADS
     sched = coev_loop();
+    Py_END_ALLOW_THREADS
     
     if (sched != NULL) {
-        Py_BEGIN_ALLOW_THREADS        
+        Py_BEGIN_ALLOW_THREADS
         if (coev_stall() == CSCHED_NOSCHEDULER) {
             Dprintf("pq_close: CSCHED_NOSCHEDULER from coev_stall(), but coev_loop() returned [%s]", sched->treepos);
             Py_FatalError("pq_close: unpossible contradiction in scheduler existence.");
