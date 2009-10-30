@@ -325,9 +325,9 @@ failed_throw:
 }
 
 PyDoc_STRVAR(mod_join_doc,
-"switch(thread_id, *args)\n\
+"join(thread_id, *args)\n\
 \n\
-Await for execution of given coroutine to cease, pass on return any values returned.\n\
+Await for execution of given coroutine to cease, pass on any values returned.\n\
 Switches to the scheduler, or to the coro in question in scheduler's absence.\n\
 ");
 
