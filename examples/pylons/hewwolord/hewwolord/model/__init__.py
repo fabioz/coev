@@ -4,7 +4,10 @@ from sqlalchemy import orm
 
 from hewwolord.model import meta
 
-def init_model(engine):
+import evmemcache as memcache
+from pylons import config
+
+def init_model(engine, mcservers, mcdebug):
     """Call me before using any of the tables or classes in the model"""
     ## Reflected tables must be defined and mapped here
     #global reflected_table
@@ -14,7 +17,8 @@ def init_model(engine):
     #
     meta.Session.configure(bind=engine)
     meta.engine = engine
-
+    meta.MemCacheClient = memcache.Client(mcservers, mcdebug)
+    meta.metadata.bind = meta.engine
 
 ## Non-reflected tables may be defined and mapped at module level
 #foo_table = sa.Table("Foo", meta.metadata,
