@@ -192,9 +192,10 @@ mod_switch_bottom_half(void) {
     coro_dprintf("coro_switch: current [%s] state=%s status=%s args=%p\n", 
         coev_treepos(self), coev_state(self), 
         coev_status(self), self->A);
-        
-    coro_dprintf("coro_switch: origin [%s] state=%s\n", 
-        coev_treepos(self->origin), coev_state(self->origin));
+    
+    if (self->origin)
+        coro_dprintf("coro_switch: origin [%s] state=%s\n", 
+            coev_treepos(self->origin), coev_state(self->origin));
     
     switch (self->status) {
         case CSW_SIGCHLD:
@@ -360,14 +361,15 @@ Stall execution of current coroutine until next runqueue pass.\n\
 
 static PyObject* 
 mod_stall(PyObject *a, PyObject* args) {
+    int rv;
     coro_dprintf("coev.stall(): current [%s]\n", 
         coev_treepos(coev_current()));
 
     Py_BEGIN_ALLOW_THREADS
-    coev_stall();
+    rv = coev_stall();
     Py_END_ALLOW_THREADS
     
-    if (coev_current()->status == CSW_SCHEDULER_NEEDED) {
+    if ((rv != 0 ) || (coev_current()->status == CSW_SCHEDULER_NEEDED)) {
         PyErr_SetNone(PyExc_CoroNoScheduler);
         return NULL;
     }
@@ -382,14 +384,15 @@ Switch to scheduler.\n\
 
 static PyObject* 
 mod_switch2scheduler(PyObject *a, PyObject* args) {
+    int rv;
     coro_dprintf("coev.switch2scheduler(): current [%s]\n", 
         coev_treepos(coev_current()));
 
     Py_BEGIN_ALLOW_THREADS
-    coev_switch2scheduler();
+    rv = coev_switch2scheduler();
     Py_END_ALLOW_THREADS
     
-    if (coev_current()->status == CSW_SCHEDULER_NEEDED) {
+    if ((rv != 0 ) || (coev_current()->status == CSW_SCHEDULER_NEEDED)) {
         PyErr_SetNone(PyExc_CoroNoScheduler);
         return NULL;
     }
@@ -805,7 +808,7 @@ PyDoc_STRVAR(mod_scheduler_doc,
 Run scheduler: dispatch pending IO or timer events");
 
 static PyObject *
-mod_scheduler(PyObject *a) {
+mod_scheduler(PyObject *a, PyObject *b) {
     coev_t *sched;
     coro_dprintf("coev.scheduler(): calling coev_loop() (cur=[%s]).\n", 
         coev_current()->treepos);
@@ -839,7 +842,7 @@ PyDoc_STRVAR(mod_current_doc,
 Return ID of currently executing coroutine object");
 
 static PyObject* 
-mod_current(PyObject *a) {
+mod_current(PyObject *a, PyObject *b) {
     return PyInt_FromLong( ((long)coev_current()) );
 }
 
@@ -848,7 +851,7 @@ PyDoc_STRVAR(mod_stats_doc,
 Returns a dict of various counters");
 
 static PyObject *
-mod_stats(PyObject *a) {
+mod_stats(PyObject *a, PyObject *b) {
     PyObject *dick, *val;
     uint64_t ary[COEV_STAT_COUNT];
     int i;
@@ -896,20 +899,20 @@ mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {
 }
 
 static PyMethodDef CoevMethods[] = {
-    {   "current", (PyCFunction)mod_current, METH_NOARGS, mod_current_doc },
-    {   "switch", (PyCFunction)mod_switch, METH_VARARGS, mod_switch_doc },
-    {   "throw", (PyCFunction)mod_throw, METH_VARARGS, mod_throw_doc },
-    {   "join", (PyCFunction)mod_join, METH_VARARGS, mod_join_doc },
-    {   "wait", (PyCFunction)mod_wait, METH_VARARGS, mod_wait_doc },
-    {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS, mod_sleep_doc },
-    {   "stall", (PyCFunction)mod_stall, METH_NOARGS, mod_stall_doc },
-    {   "switch2scheduler", (PyCFunction)mod_switch2scheduler, METH_NOARGS, mod_switch2scheduler_doc },
-    {   "schedule", (PyCFunction)mod_schedule, METH_VARARGS, mod_schedule_doc},
-    {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS, mod_scheduler_doc },
-    {   "stats", (PyCFunction)mod_stats, METH_NOARGS, mod_stats_doc },
+    {   "current", mod_current, METH_NOARGS, mod_current_doc },
+    {   "switch", mod_switch, METH_VARARGS, mod_switch_doc },
+    {   "throw", mod_throw, METH_VARARGS, mod_throw_doc },
+    {   "join", mod_join, METH_VARARGS, mod_join_doc },
+    {   "wait", mod_wait, METH_VARARGS, mod_wait_doc },
+    {   "sleep", mod_sleep, METH_VARARGS, mod_sleep_doc },
+    {   "stall", mod_stall, METH_NOARGS, mod_stall_doc },
+    {   "switch2scheduler", mod_switch2scheduler, METH_NOARGS, mod_switch2scheduler_doc },
+    {   "schedule", mod_schedule, METH_VARARGS, mod_schedule_doc},
+    {   "scheduler", mod_scheduler, METH_NOARGS, mod_scheduler_doc },
+    {   "stats", mod_stats, METH_NOARGS, mod_stats_doc },
     {   "setdebug", (PyCFunction)mod_setdebug,
         METH_VARARGS | METH_KEYWORDS, mod_setdebug_doc },
-    {   "getpos", (PyCFunction)mod_getpos, METH_VARARGS, mod_getpos_doc},
+    {   "getpos", mod_getpos, METH_VARARGS, mod_getpos_doc},
         
     { 0 }
 };
