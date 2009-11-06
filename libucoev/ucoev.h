@@ -259,6 +259,9 @@ int coev_schedule(coev_t *waiter);
    returns 0 on success, CSCHED_* on error */
 int coev_stall(void);
 
+/* switch to scheduler and not schedule itself. */
+int coev_switch2scheduler(void);
+
 /* ensure switchback will only occur after given coro exits, and will be from it */
 void coev_join(coev_t *);
 

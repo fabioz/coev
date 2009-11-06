@@ -886,6 +886,16 @@ coev_stall(void) {
     return CSCHED_NOSCHEDULER;
 }
 
+int
+coev_switch2scheduler(void) {
+    if (ts_scheduler.scheduler) {
+        coev_switch(ts_scheduler.scheduler);
+        /* FIXME: switch may fail, though it should be impossible. */
+        return 0;
+    }
+    return CSCHED_NOSCHEDULER;
+}
+
 /* in your io_scheduler, stopping your watcher, switching to your waiter */
 static void 
 io_callback(struct ev_loop *loop, ev_io *w, int revents) {

@@ -374,6 +374,27 @@ mod_stall(PyObject *a, PyObject* args) {
     return mod_switch_bottom_half();
 }
 
+PyDoc_STRVAR(mod_switch2scheduler_doc,
+"switch2scheduler()\n\
+\n\
+Switch to scheduler.\n\
+");
+
+static PyObject* 
+mod_switch2scheduler(PyObject *a, PyObject* args) {
+    coro_dprintf("coev.switch2scheduler(): current [%s]\n", 
+        coev_treepos(coev_current()));
+
+    Py_BEGIN_ALLOW_THREADS
+    coev_switch2scheduler();
+    Py_END_ALLOW_THREADS
+    
+    if (coev_current()->status == CSW_SCHEDULER_NEEDED) {
+        PyErr_SetNone(PyExc_CoroNoScheduler);
+        return NULL;
+    }
+    return mod_switch_bottom_half();
+}
 
 PyDoc_STRVAR(mod_getpos_doc,
 "getpos([id]) -> str \n\
@@ -881,7 +902,8 @@ static PyMethodDef CoevMethods[] = {
     {   "join", (PyCFunction)mod_join, METH_VARARGS, mod_join_doc },
     {   "wait", (PyCFunction)mod_wait, METH_VARARGS, mod_wait_doc },
     {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS, mod_sleep_doc },
-    {   "stall", (PyCFunction)mod_stall, METH_VARARGS, mod_stall_doc },
+    {   "stall", (PyCFunction)mod_stall, METH_NOARGS, mod_stall_doc },
+    {   "mod_switch2scheduler", (PyCFunction)mod_switch2scheduler, METH_NOARGS, mod_switch2scheduler_doc },
     {   "schedule", (PyCFunction)mod_schedule, METH_VARARGS, mod_schedule_doc},
     {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS, mod_scheduler_doc },
     {   "stats", (PyCFunction)mod_stats, METH_NOARGS, mod_stats_doc },
