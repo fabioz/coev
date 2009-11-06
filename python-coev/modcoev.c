@@ -903,7 +903,7 @@ static PyMethodDef CoevMethods[] = {
     {   "wait", (PyCFunction)mod_wait, METH_VARARGS, mod_wait_doc },
     {   "sleep", (PyCFunction)mod_sleep, METH_VARARGS, mod_sleep_doc },
     {   "stall", (PyCFunction)mod_stall, METH_NOARGS, mod_stall_doc },
-    {   "mod_switch2scheduler", (PyCFunction)mod_switch2scheduler, METH_NOARGS, mod_switch2scheduler_doc },
+    {   "switch2scheduler", (PyCFunction)mod_switch2scheduler, METH_NOARGS, mod_switch2scheduler_doc },
     {   "schedule", (PyCFunction)mod_schedule, METH_VARARGS, mod_schedule_doc},
     {   "scheduler", (PyCFunction)mod_scheduler, METH_NOARGS, mod_scheduler_doc },
     {   "stats", (PyCFunction)mod_stats, METH_NOARGS, mod_stats_doc },
