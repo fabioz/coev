@@ -5,8 +5,6 @@ from setuptools import setup, Extension
 VERSION = '0.5'
 DESCRIPTION = 'libucoev bindings - I/O-scheduled coroutines'
 LONG_DESCRIPTION = """
-    This is one half of greenlet/stackless - inspired .
-
     libucoev, ucoev Python threading model and the present module 
     are the results of implementing event- and cooperatively-
     scheduled coroutines on top of ucontext_t and associated libc 
@@ -24,7 +22,7 @@ Operating System :: POSIX
 Topic :: Software Development :: Libraries :: Python Modules
 """.splitlines()))
 
-REPOSITORY="http://coev.lxnt.info/"
+REPOSITORY="https://coev.googlecode.com/hg/"
 
 daext = Extension(
     name='coev', 
@@ -40,7 +38,7 @@ setup(
     long_description=LONG_DESCRIPTION,
     classifiers=CLASSIFIERS,
     maintainer="Alexander Sabourenkov",
-    maintainer_email="screwdriver@lxnt.info",
+    maintainer_email="llxxnntt@gmail.com",
     url=REPOSITORY,
     license="MIT License",
     platforms=['any'],

@@ -1,6 +1,6 @@
 # setup.py - distutils packaging
 #
-# Copyright (C) 2009 Alexander Sabourenkov  <screwdriver@lxnt.info>
+# Copyright (C) 2009 Alexander Sabourenkov  <llxxnntt@gmail.com>
 # Copyright (C) 2003-2004 Federico Di Gregorio  <fog@debian.org>
 #
 # This program is free software; you can redistribute it and/or modify
@@ -391,12 +391,12 @@ ext.append(Extension("psycoev._psycoev", sources,
                      undef_macros=[]))
 setup(name="psycoev",
       version=PSYCOEV_VERSION,
+      author="Federico Di Gregorio",
+      author_email="fog@debian.org",
       maintainer="Alexander Sabourenkov",
-      maintainer_email="screwdriver@lxnt.info",
-      author="Alexander Sabourenkov",
-      author_email="screwdriver@lxnt.info",
-      url="http://coev.lxnt.info/psycoev/",
-      download_url = "http://coev.lxnt.info/psycoev/",
+      maintainer_email="llxxnntt@gmail.com",
+      url="http://code.google.com/p/coev/",
+      download_url = "https://coev.googlecode.com/hg/",
       license="GPL with exceptions or ZPL",
       platforms = ["any"],
       description=__doc__.split("\n")[0],

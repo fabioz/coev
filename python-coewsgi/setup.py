@@ -18,7 +18,7 @@ Operating System :: POSIX
 Topic :: Software Development :: Libraries :: Python Modules
 """.splitlines()))
 
-REPOSITORY="http://coev.lxnt.info/"
+REPOSITORY="https://coev.googlecode.com/hg/"
 
 
 setup(name='coewsgi',
@@ -27,8 +27,8 @@ setup(name='coewsgi',
       long_description=LONG_DESCRIPTION,
       classifiers=CLASSIFIERS,
       author='Alexander Sabourenkov',
-      author_email='screwdriver@lxnt.info',
-      url='http://coev.lxnt.info/',
+      author_email='llxxnntt@gmail.com',
+      url='http://code.google.com/p/coev/',
       license='MIT License',
       packages=['coewsgi'],
       include_package_data=True,
