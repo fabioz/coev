@@ -1,6 +1,6 @@
 CFLAGS=-fwrapv -O2 -fno-strict-aliasing -Wstrict-prototypes -g -Wall -fPIC 
 
-PREFIX?=~/prefix
+#PREFIX?=/usr
 
 #CFLAGS+=-pthread -DTHREADING_MADNESS
 
@@ -16,5 +16,5 @@ clean:
 	rm -f ${SONAME} *.o
 
 install: clean all
-	install -D ${SONAME} ${PREFIX}/lib/${SONAME}
-	install -D ucoev.h ${PREFIX}/include/ucoev.h
+	install -D ${SONAME} ${DESTDIR}/usr/lib/${SONAME}
+	install -D ucoev.h ${DESTDIR}/usr/include/ucoev.h
