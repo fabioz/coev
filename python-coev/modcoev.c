@@ -877,10 +877,9 @@ mod_stats(PyObject *a, PyObject *b) {
 }
 
 PyDoc_STRVAR(mod_setdebug_doc,
-"setdebug([module=False, [library=False, [switchdump=False]]]) -> \n\n\
+"setdebug([module=False, [library=0]) -> \n\n\
 module -- enable module-level debug output.\n\
-library -- enable library-level debug output \n\
-switchdump -- dump coev_t structures too.\n");
+library -- enable library-level debug output, see CDF_* constants \n");
 
 static PyObject *
 mod_setdebug(PyObject *a, PyObject *args, PyObject *kwargs) {

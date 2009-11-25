@@ -65,23 +65,23 @@ class ConnectionProxy(object):
     def __init__(self, connection):
         self.conn = connection
 
-    def read(hint=0):
+    def read(self, hint=0):
         try:
             return self.conn.sfile.read(hint)
         except:
             self.conn.dead = True
             raise
         
-    def readline(hint=0):
+    def readline(self, hint=0):
         try:
             return self.conn.sfile.readline(hint)
         except:
             self.conn.dead = True
             raise
         
-    def write(hint):
+    def write(self, data):
         try:
-            return self.conn.sfile.write(hint)
+            return self.conn.sfile.write(data)
         except:
             self.conn.dead = True
             raise
@@ -132,7 +132,6 @@ class ConnectionPool(object):
         for endpoint in endpoints:
             try:
                 conn = Connection(self, endpoint, self.conn_timeout, self.iop_timeout, self.read_limit)
-                print repr(conn)
             except Timeout:
                 pass
             except socket.error, e:
