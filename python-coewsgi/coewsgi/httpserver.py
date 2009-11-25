@@ -152,6 +152,43 @@ class WSGIHandlerMixin:
         else:
             return self.server_version + ' ' + self.sys_version
 
+    # lifted from BaseHTTPServer to reduce write() count.
+    def send_response(self, code, message=None):
+        """Send the response header and log the response code.
+
+        Also send two standard headers with the server software
+        version and the current date.
+
+        """
+        self.log_request(code)
+        if message is None:
+            if code in self.responses:
+                message = self.responses[code][0]
+            else:
+                message = ''
+        if self.request_version != 'HTTP/0.9':
+            self.rq_header += "%s %d %s\r\n" % (self.protocol_version, code, message)
+            # print (self.protocol_version, code, message)
+        self.send_header('Server', self.version_string())
+        self.send_header('Date', self.date_time_string())
+
+    def send_header(self, keyword, value):
+        """Send a MIME header."""
+        if self.request_version != 'HTTP/0.9':
+            self.rq_header += "%s: %s\r\n" % (keyword, value)
+
+        if keyword.lower() == 'connection':
+            if value.lower() == 'close':
+                self.close_connection = 1
+            elif value.lower() == 'keep-alive':
+                self.close_connection = 0
+
+    def end_headers(self):
+        """Send the blank line ending the MIME headers."""
+        if self.request_version != 'HTTP/0.9':
+            self.rq_header += "\r\n"
+        self.wfile.write(self.rq_header)
+
     def wsgi_write_chunk(self, chunk):
         """
         Write a chunk of the output stream; send headers if they
@@ -161,6 +198,7 @@ class WSGIHandlerMixin:
             raise RuntimeError(
                 "Content returned before start_response called")
         if not self.wsgi_headers_sent:
+            self.rq_header = ''
             self.wsgi_headers_sent = True
             (status, headers) = self.wsgi_curr_headers
             code, message = status.split(" ", 1)
