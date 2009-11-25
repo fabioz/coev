@@ -13,6 +13,7 @@ mkdir -p $PREFIX || exit 1
 [ -f ez_setup.py ] || wget http://peak.telecommunity.com/dist/ez_setup.py || exit 1
 $PREFIX/bin/python ez_setup.py || exit 1
 ( cd python-coev && rm -rf build && ./build.sh ) || exit 1
+( cd python-coewsgi && ${PREFIX}/bin/python setup.py install ) || exit 1
 ( cd python-psycoev && rm -rf build && ./build.sh ) || exit 1
 ( cd python-evmemcached && ${PREFIX}/bin/python setup.py install ) || exit 1
 
@@ -20,8 +21,6 @@ $PREFIX/bin/python ez_setup.py || exit 1
 # which we just installed so ... the commands below will pull Paste, Pylons
 # and the rest of stuff needed for a Pylons project
 #
-#wget http://peak.telecommunity.com/dist/ez_setup.py
-#$PREFIX/bin/python ez_setup.py || exit 1
 #( cd examples/pylons && ${PREFIX}/bin/python setup.py install ) || exit 1
 
 echo
