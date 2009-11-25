@@ -958,9 +958,10 @@ def _doctest():
     except Exception, e:
         print repr(e)
 
-def test_runner():
-    print "Testing docstrings..."
-    _doctest()
+def test_runner(prefix):
+    if not prefix:
+        print "Testing docstrings..."
+        _doctest()
     print "Running tests:"
     print
     serverList = [["127.0.0.1:11211"]]
@@ -996,32 +997,32 @@ def test_runner():
                     return self.bar == other.bar
                 return 0
 
-        test_setget("a_string", "some random string")
-        test_setget("an_integer", 42)
-        if test_setget("long", long(1<<30)):
+        test_setget(prefix+"a_string", "some random string")
+        test_setget(prefix+"an_integer", 42)
+        if test_setget(prefix+"long", long(1<<30)):
             print "Testing delete ...",
-            if mc.delete("long"):
+            if mc.delete(prefix+"long"):
                 print "OK"
             else:
                 print "FAIL"
         print "Testing get_multi ...",
-        print mc.get_multi(["a_string", "an_integer"])
+        print mc.get_multi([prefix+"a_string", "an_integer"])
 
         print "Testing get(unknown value) ...",
-        print to_s(mc.get("unknown_value"))
+        print to_s(mc.get(prefix+"unknown_value"))
 
         f = FooStruct()
-        test_setget("foostruct", f)
+        test_setget(prefix+"foostruct", f)
 
         print "Testing incr ...",
-        x = mc.incr("an_integer", 1)
+        x = mc.incr(prefix+"an_integer", 1)
         if x == 43:
             print "OK"
         else:
             print "FAIL"
 
         print "Testing decr ...",
-        x = mc.decr("an_integer", 1)
+        x = mc.decr(prefix+"an_integer", 1)
         if x == 42:
             print "OK"
         else:
@@ -1030,7 +1031,7 @@ def test_runner():
         # sanity tests
         print "Testing sending spaces...",
         try:
-            x = mc.set("this has spaces", 1)
+            x = mc.set(prefix+"this has spaces", 1)
         except Client.MemcachedKeyCharacterError, msg:
             print "OK"
         else:
@@ -1038,7 +1039,7 @@ def test_runner():
 
         print "Testing sending control characters...",
         try:
-            x = mc.set("this\x10has\x11control characters\x02", 1)
+            x = mc.set(prefix+"this\x10has\x11control characters\x02", 1)
         except Client.MemcachedKeyCharacterError, msg:
             print "OK"
         else:
@@ -1046,7 +1047,7 @@ def test_runner():
 
         print "Testing using insanely long key...",
         try:
-            x = mc.set('a'*SERVER_MAX_KEY_LENGTH + 'aaaa', 1)
+            x = mc.set(prefix+'a'*SERVER_MAX_KEY_LENGTH + 'aaaa', 1)
         except Client.MemcachedKeyLengthError, msg:
             print "OK"
         else:
@@ -1075,36 +1076,41 @@ def test_runner():
             print "FAIL"
 
         print "Testing using a value larger than the memcached value limit...",
-        x = mc.set('keyhere', 'a'*SERVER_MAX_VALUE_LENGTH)
-        if mc.get('keyhere') == None:
+        x = mc.set(prefix+'keyhere', 'a'*SERVER_MAX_VALUE_LENGTH)
+        if mc.get(prefix+'keyhere') == None:
             print "OK",
         else:
             print "FAIL",
-        x = mc.set('keyhere', 'a'*SERVER_MAX_VALUE_LENGTH + 'aaa')
-        if mc.get('keyhere') == None:
+        x = mc.set(prefix+'keyhere', 'a'*SERVER_MAX_VALUE_LENGTH + 'aaa')
+        if mc.get(prefix+'keyhere') == None:
             print "OK"
         else:
             print "FAIL"
 
-        print "Testing set_multi() with no memcacheds running",
-        mc.disconnect_all()
-        errors = mc.set_multi({'keyhere' : 'a', 'keythere' : 'b'})
-        if errors != []:
-            print "FAIL"
-        else:
-            print "OK"
+        if not prefix:
+            print "Testing set_multi() with no memcacheds running",
+            mc.disconnect_all()
+            errors = mc.set_multi({'keyhere' : 'a', 'keythere' : 'b'})
+            if errors != []:
+                print "FAIL"
+            else:
+                print "OK"
 
-        print "Testing delete_multi() with no memcacheds running",
-        mc.disconnect_all()
-        ret = mc.delete_multi({'keyhere' : 'a', 'keythere' : 'b'})
-        if ret != 1:
-            print "FAIL"
-        else:
-          print "OK"
+            print "Testing delete_multi() with no memcacheds running",
+            mc.disconnect_all()
+            ret = mc.delete_multi({'keyhere' : 'a', 'keythere' : 'b'})
+            if ret != 1:
+                print "FAIL"
+            else:
+              print "OK"
 
 if __name__ == "__main__":
     import thread
-    thread.start_new_thread(test_runner,())
+    thread.start_new_thread(test_runner,(None,))
+    coev.scheduler()
+    
+    for i in xrange(15):
+        thread.start_new_thread(test_runner,("c%dx:" % (i,),))
     coev.scheduler()
 
 
