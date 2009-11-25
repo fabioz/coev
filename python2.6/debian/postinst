@@ -1,0 +1,33 @@
+#! /bin/sh -e
+
+if [ "$1" = configure ]; then
+    (
+    files=$(dpkg -L python2.6-coev | sed -n '/^\/usr\/lib\/python2.6-coev\/.*\.py$/p')
+        python2.6-coev /usr/lib/python2.6-coev/py_compile.py $files
+        if grep -sq '^byte-compile[^#]*optimize' /etc/python/debian_config; then
+            python2.6-coev -O /usr/lib/python2.6-coev/py_compile.py $files
+        fi
+    )
+fi
+
+case "$1" in
+    configure|abort-upgrade|abort-remove|abort-deconfigure)
+
+        # Create empty directories in /usr/local
+        if [ ! -e /usr/local/lib/python2.6-coev ]; then
+            mkdir -p /usr/local/lib/python2.6-coev 2> /dev/null || true
+            chmod 2775 /usr/local/lib/python2.6-coev 2> /dev/null || true
+            chown root:staff /usr/local/lib/python2.6-coev 2> /dev/null || true
+        fi
+        if [ ! -e /usr/local/lib/python2.6-coev/site-packages ]; then
+            mkdir -p /usr/local/lib/python2.6-coev/site-packages 2> /dev/null || true
+            chmod 2775 /usr/local/lib/python2.6-coev/site-packages 2> /dev/null || true
+            chown root:staff /usr/local/lib/python2.6-coev/site-packages 2> /dev/null || true
+        fi
+    ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+    ;;
+esac
