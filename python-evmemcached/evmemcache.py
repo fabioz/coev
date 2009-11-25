@@ -51,6 +51,7 @@ import re
 import types
 import errno
 import coev
+
 try:
     import cPickle as pickle
 except ImportError:
@@ -87,16 +88,7 @@ SERVER_MAX_VALUE_LENGTH = 1024*1024
 class _Error(Exception):
     pass
 
-try:
-    # Only exists in Python 2.4+
-    from threading import local
-except ImportError:
-    # TODO:  add the pure-python local implementation
-    class local(object):
-        pass
-
-
-class Client(local):
+class Client(object):
     """
     Object representing a pool of memcache servers.
 
@@ -155,7 +147,6 @@ class Client(local):
         @param pid: optional persistent_id function to call on pickle storing.
         Useful for cPickle since subclassing isn't allowed.
         """
-        local.__init__(self)
         self.set_servers(servers)
         self.debug = debug
         self.stats = {}
@@ -860,11 +851,13 @@ class _Host:
         if hostData.get('proto') == 'unix':
             self.family = socket.AF_UNIX
             self.address = hostData['path']
+            ep = (self.family, socket.SOCK_STREAM, ( self.address, ))
         else:
             self.family = socket.AF_INET
             self.ip = hostData['host']
             self.port = int(hostData.get('port', 11211))
             self.address = ( self.ip, self.port )
+            ep = ( self.family, socket.SOCK_STREAM, self.address )
 
         if not debugfunc:
             debugfunc = lambda x: x
@@ -872,6 +865,9 @@ class _Host:
 
         self.deaduntil = 0
         self.socket = None
+        
+        self.cpool = coev.ConnectionPool(1<<23, 4.2, 4.2, 4.2, 8192, ep)
+
 
     def _check_dead(self):
         if self.deaduntil and self.deaduntil > time.time():
@@ -880,45 +876,18 @@ class _Host:
         return 0
 
     def connect(self):
-        if self._get_socket():
+        self.sfile = self.cpool.get()
+        if self.sfile:
             return 1
         return 0
 
     def mark_dead(self, reason):
         self.debuglog("MemCache: %s: %s.  Marking dead." % (self, reason))
         self.deaduntil = time.time() + _Host._DEAD_RETRY
-        self.close_socket()
-
-    def _get_socket(self):
-        if self._check_dead():
-            return None
-        if self.socket:
-            return self.socket
-        s = socket.socket(self.family, socket.SOCK_STREAM)
-        s.setblocking(0)
-        try:
-            try:
-                s.connect(self.address)
-            except socket.error, msg:
-                if msg[0] == errno.EINPROGRESS:
-                    coev.wait(s.fileno(), coev.WRITE, self._SOCKET_TIMEOUT)
-                else:
-                    if type(msg) is types.TupleType: msg = msg[1]
-                    self.mark_dead("connect: %s" % msg[1])
-                    return None
-        except socket.error, msg:
-            if type(msg) is types.TupleType: msg = msg[1]
-            self.mark_dead("connect: %s" % msg[1])
-            return None
-                
-        self.socket = s
-        self.sfile = coev.socketfile(s.fileno(), self._SOCKET_TIMEOUT, 4096)
-        return s
+        self.sfile = None
 
     def close_socket(self):
-        if self.socket:
-            self.socket.close()
-            self.socket = None
+        self.sfile = None
 
     def send_cmd(self, cmd):
         self.sfile.write(cmd + '\r\n')
@@ -976,15 +945,18 @@ def check_key(key, key_extra_len=0):
              raise Client.MemcachedKeyLengthError, ("Key length is > %s"
                      % SERVER_MAX_KEY_LENGTH)
         for char in key:
-            if ord(char) < 32 or ord(char) == 127:
+            if ord(char) <= 32 or ord(char) == 127:
                 raise Client.MemcachedKeyCharacterError, "Control characters not allowed"
 
 def _doctest():
     import doctest, evmemcache
-    servers = ["127.0.0.1:11211"]
-    mc = Client(servers, debug=1)
-    globs = {"mc": mc}
-    return doctest.testmod(evmemcache, globs=globs)
+    try:
+        servers = ["127.0.0.1:11211"]
+        mc = Client(servers, debug=1)
+        globs = {"mc": mc}
+        return doctest.testmod(evmemcache, globs=globs)
+    except Exception, e:
+        print repr(e)
 
 def test_runner():
     print "Testing docstrings..."
