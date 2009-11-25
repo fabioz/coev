@@ -25,7 +25,7 @@ Topic :: Software Development :: Libraries :: Python Modules
 REPOSITORY="https://coev.googlecode.com/hg/"
 
 daext = Extension(
-    name='coev', 
+    name='_coev', 
     sources=['modcoev.c'], 
     undef_macros=['NDEBUG'],
     libraries=['ucoev']
@@ -45,5 +45,6 @@ setup(
     test_suite='nose.collector',
     download_url=REPOSITORY,
     ext_modules=[daext],
+    packages=['coev'],
     zip_safe=False
 )

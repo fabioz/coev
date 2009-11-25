@@ -1,8 +1,8 @@
 import random
 import socket
 import errno
-import coev
-
+from _coev import *
+from _coev import __version__
 """
 process-wide connection pool. 
 
@@ -41,7 +41,7 @@ class Connection(object):
                 s.connect(endpoint[2])
             except socket.error, msg:
                 if msg[0] == errno.EINPROGRESS:
-                    coev.wait(s.fileno(), coev.WRITE, conn_timeout)
+                    wait(s.fileno(), WRITE, conn_timeout)
                 else:
                     print msg
                     s.close()
@@ -49,7 +49,7 @@ class Connection(object):
             else:
                 break
         self.sock = s
-        self.sfile = coev.socketfile(s.fileno(), 
+        self.sfile = socketfile(s.fileno(), 
             iop_timeout, read_limit)
         
         self.endpoint = endpoint
@@ -119,7 +119,7 @@ class ConnectionPool(object):
             while len(self.busy) == self.conn_limit:
                 if time.time() - wait_start_time > self.conn_busy_wait:
                     raise TooManyConnections("waited for {0} seconds".format(time.time() - wait_start_time))
-                coev.sleep(self.conn_timeout)
+                sleep(self.conn_timeout)
         
         if len(self.available) > 0:
             conn = self.available.pop()
@@ -133,7 +133,7 @@ class ConnectionPool(object):
             try:
                 conn = Connection(self, endpoint, self.conn_timeout, self.iop_timeout, self.read_limit)
                 print repr(conn)
-            except coev.Timeout:
+            except Timeout:
                 pass
             except socket.error, e:
                 pass
@@ -193,7 +193,7 @@ def _do_stuff():
 if __name__ == "__main__":
     import thread
     thread.start_new_thread(_do_stuff, ())
-    coev.scheduler()
+    scheduler()
     
     
     

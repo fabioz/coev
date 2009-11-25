@@ -918,13 +918,13 @@ static PyMethodDef CoevMethods[] = {
 };
 
 
-void 
-initcoev(void) {
+void
+init_coev(void) {
     PyObject* m;
     static void *PyCoev_API[PyCoev_API_pointers];
     PyObject *c_api_object;
 
-    m = Py_InitModule("coev", CoevMethods);
+    m = Py_InitModule("_coev", CoevMethods);
     if (m == NULL)
         return;
     
