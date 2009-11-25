@@ -998,4 +998,6 @@ init_coev(void) {
         l = PyThread_allocate_lock();
         PyThread_release_lock(l);
     }
+    
+    Py_AtExit(coev_dmflush);
 }
