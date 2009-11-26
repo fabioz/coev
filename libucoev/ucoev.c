@@ -104,6 +104,9 @@ coev_dmflush(void) {
 #define coev_dump(msg, coev) do { if (_fm.debug & CDF_COEV_DUMP) \
     _coev_dump(msg, coev); } while(0)
 
+#define runq_dump(msg) do { if (_fm.debug & CDF_RUNQ_DUMP) \
+    _runq_dump(msg); } while(0)
+
 #define cnrb_dprintf(fmt, args...) do { if (_fm.debug & CDF_NBUF) \
     coev_dmprintf(fmt, ## args); } while(0)
 
@@ -829,7 +832,7 @@ coev_runq_append(coev_t *waiter) {
 }
 
 static void
-dump_runqueue(const char *header) {
+_runq_dump(const char *header) {
     coev_t *next = ts_scheduler.runq_head;
     coev_dprintf("%s\n", header);
     
@@ -840,7 +843,7 @@ dump_runqueue(const char *header) {
         coev_dprintf("    <%p> [%s] %s %s\n", next, next->treepos,
             str_coev_state[next->state], str_coev_status[next->status] );
         if (next == next->rq_next)
-            _fm.abort("dump_runqueue(): runqueue loop detected");
+            _fm.abort("_runq_dump(): runqueue loop detected");
         next = next->rq_next;
     }
 }
@@ -1084,7 +1087,7 @@ coev_loop(void) {
 	coev_t *target, *runq_head;
         
         
-	dump_runqueue("coev_loop(): runqueue before running it");
+	runq_dump("coev_loop(): runqueue before running it");
         coev_dprintf("coev_loop(): %d waiters\n", ts_scheduler.waiters);
 	
         /* guard against infinite loop in scheduler in case something 
@@ -1140,7 +1143,7 @@ coev_loop(void) {
             }
 	}
         
-	dump_runqueue("coev_loop(): runqueue after running it");
+	runq_dump("coev_loop(): runqueue after running it");
         coev_dprintf("coev_loop(): %d waiters\n", ts_scheduler.waiters);
         
 	if (ts_scheduler.runq_head != NULL) 
