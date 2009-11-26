@@ -236,6 +236,7 @@ mod_switch_bottom_half(void) {
             }
             
         case CSW_SCHEDULER_NEEDED:
+        case CSW_YOURTURN:
             Py_CLEAR(self->A);
             Py_RETURN_NONE;
         
@@ -249,7 +250,6 @@ mod_switch_bottom_half(void) {
         case CSW_EVENT:     /* should only be seen in coev_scheduled_switch(), not here. */
         case CSW_WAKEUP:    /* same. */
         case CSW_TIMEOUT:   /* same. */
-        case CSW_YOURTURN:  /* same. */
         default:
             Py_CLEAR(self->A);
             PyErr_Format(PyExc_CoroError,

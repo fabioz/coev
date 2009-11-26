@@ -868,6 +868,7 @@ coev_schedule(coev_t *waiter) {
     }
     
     waiter->state = CSTATE_SCHEDULED;
+    waiter->status = CSW_YOURTURN;
     coev_runq_append(waiter);
     coev_dprintf("coev_schedule: [%s] %s scheduled.\n",
         waiter->treepos, str_coev_state[waiter->state]);
