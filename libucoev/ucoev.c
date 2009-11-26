@@ -1708,8 +1708,8 @@ sf_extract_line(cnrbuf_t *self, const char *startfrom, void **p, ssize_t sizehin
                 self->in_position = self->in_buffer;
             else    
                 self->in_position += len;
-            cnrb_dprintf("buffer meta after extraction:\n");
             cnrb_dump(self);
+            cnrb_dprintf("sf_extract_line(): extracted %d bytes\n", len);
             return len;
         }
     }
@@ -1723,7 +1723,7 @@ sf_extract_line(cnrbuf_t *self, const char *startfrom, void **p, ssize_t sizehin
             return 0;
     } else {
         /* bound by buffer size limit */
-        if (self->in_allocated < self->in_limit)
+        if (self->in_used < self->in_limit)
             return 0;
     }
     
@@ -1733,7 +1733,7 @@ sf_extract_line(cnrbuf_t *self, const char *startfrom, void **p, ssize_t sizehin
     
     self->in_used = 0;
     self->in_position = self->in_buffer;
-    
+    cnrb_dprintf("sf_extract_line(): over line length limit: returning %d bytes\n", len);
     return len;
 }
 
