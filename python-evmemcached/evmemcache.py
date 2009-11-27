@@ -41,6 +41,40 @@ Detailed Documentation
 ======================
 
 More detailed documentation is available in the L{Client} class.
+
+
+
+Usage with coev
+===============
+
+setup.py:
+    import evmemcache
+    mc = evmemcache.Client(['host1:port', 'host2:port'])
+
+
+action.py:
+    import setup, coev, thread
+
+    def runner(number)
+        setup.mc.get(stuff)
+        
+    for i in xrange(many):
+        thread.start_new_thread(runner, (i,))
+    coev.scheduler()
+    
+
+
+So a client is bound to a bunch of hosts. Each host is a coev.ConnectionPool
+
+a coro does say .get_multi(). it should check out a connection for every server 
+used, and use them only.
+
+
+
+
+
+
+
 """
 
 import sys
@@ -189,17 +223,16 @@ class Client(object):
         '''
         data = []
         for s in self.servers:
-            if not s.connect(): continue
+            connection = s.connect()
             if s.family == socket.AF_INET:
                 name = '%s:%s (%s)' % ( s.ip, s.port, s.weight )
             else:
                 name = 'unix:%s (%s)' % ( s.address, s.weight )
-            s.send_cmd('stats')
+            connection.send_cmd('stats')
             serverData = {}
             data.append(( name, serverData ))
-            readline = s.readline
             while 1:
-                line = readline()
+                line = connection.readline()
                 if not line or line.strip() == 'END': break
                 stats = line.split(' ', 2)
                 serverData[stats[1]] = stats[2]
@@ -209,17 +242,16 @@ class Client(object):
     def get_slabs(self):
         data = []
         for s in self.servers:
-            if not s.connect(): continue
+            connection = s.connect()
             if s.family == socket.AF_INET:
                 name = '%s:%s (%s)' % ( s.ip, s.port, s.weight )
             else:
                 name = 'unix:%s (%s)' % ( s.address, s.weight )
             serverData = {}
             data.append(( name, serverData ))
-            s.send_cmd('stats items')
-            readline = s.readline
+            connection.send_cmd('stats items')
             while 1:
-                line = readline()
+                line = connection.readline()
                 if not line or line.strip() == 'END': break
                 item = line.split(' ', 2)
                 #0 = STAT, 1 = ITEM, 2 = Value
@@ -233,9 +265,12 @@ class Client(object):
     def flush_all(self):
         'Expire all data currently in the memcache servers.'
         for s in self.servers:
-            if not s.connect(): continue
-            s.send_cmd('flush_all')
-            s.expect("OK")
+            try:
+                connection = s.connect()
+                s.send_cmd('flush_all')
+                s.expect("OK")
+            except:
+                pass
 
     def debuglog(self, str):
         if self.debug:
@@ -266,6 +301,8 @@ class Client(object):
         else:
             serverhash = serverHashFunction(key)
 
+        return self.buckets[serverhash % len(self.buckets)], key
+
         for i in range(Client._SERVER_RETRIES):
             server = self.buckets[serverhash % len(self.buckets)]
             if server.connect():
@@ -276,7 +313,7 @@ class Client(object):
 
     def disconnect_all(self):
         for s in self.servers:
-            s.close_socket()
+            s.drop_idle()
 
     def delete_multi(self, keys, time=0, key_prefix=''):
         '''
@@ -308,7 +345,7 @@ class Client(object):
         self._statlog('delete_multi')
 
         server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(keys, key_prefix)
-
+        connection_keys = {}
         # send out all requests on each server before reading anything
         dead_servers = []
 
@@ -323,7 +360,9 @@ class Client(object):
                 for key in server_keys[server]: # These are mangled keys
                   write("delete %s\r\n" % key)
             try:
-                server.send_cmds(''.join(bigcmd))
+                connection = server.connect()
+                connection.send_cmds(''.join(bigcmd))
+                connection_keys[connection] = server_keys[server]
             except socket.error, msg:
                 rc = 0
                 if type(msg) is types.TupleType: msg = msg[1]
@@ -335,13 +374,13 @@ class Client(object):
             del server_keys[server]
 
         notstored = [] # original keys.
-        for server, keys in server_keys.iteritems():
+        for connection, keys in connection_keys.iteritems():
             try:
                 for key in keys:
-                    server.expect("DELETED")
+                    connection.expect("DELETED")
             except socket.error, msg:
                 if type(msg) is types.TupleType: msg = msg[1]
-                server.mark_dead(msg)
+                connection.mark_dead(msg)
                 rc = 0
         return rc
 
@@ -363,8 +402,9 @@ class Client(object):
             cmd = "delete %s" % key
 
         try:
-            server.send_cmd(cmd)
-            server.expect("DELETED")
+            connection = server.connect()
+            connection.send_cmd(cmd)
+            connection.expect("DELETED")
         except socket.error, msg:
             if type(msg) is types.TupleType: msg = msg[1]
             server.mark_dead(msg)
@@ -416,8 +456,9 @@ class Client(object):
         self._statlog(cmd)
         cmd = "%s %s %d" % (cmd, key, delta)
         try:
-            server.send_cmd(cmd)
-            line = server.readline()
+            connection = server.connect()
+            connection.send_cmd(cmd)
+            line = connection.readline()
             return int(line)
         except socket.error, msg:
             if type(msg) is types.TupleType: msg = msg[1]
@@ -496,7 +537,8 @@ class Client(object):
 
 
     def _map_and_prefix_keys(self, key_iterable, key_prefix):
-        """Compute the mapping of server (_Host instance) -> list of keys to stuff onto that server, as well as the mapping of
+        """Compute the mapping of server (_Host instance) -> list of keys to stuff 
+        onto that server, as well as the mapping of
         prefixed key -> original key.
 
 
@@ -580,6 +622,7 @@ class Client(object):
 
 
         server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(mapping.iterkeys(), key_prefix)
+        connection_keys = {}
 
         # send out all requests on each server before reading anything
         dead_servers = []
@@ -591,7 +634,9 @@ class Client(object):
                 for key in server_keys[server]: # These are mangled keys
                     store_info = self._val_to_store_info(mapping[prefixed_to_orig_key[key]], min_compress_len)
                     write("set %s %d %d %d\r\n%s\r\n" % (key, store_info[0], time, store_info[1], store_info[2]))
-                server.send_cmds(''.join(bigcmd))
+                connection =  server.connect()
+                connection.send_cmds(''.join(bigcmd))
+                connection_keys[connection] = server_keys[server]
             except socket.error, msg:
                 if type(msg) is types.TupleType: msg = msg[1]
                 server.mark_dead(msg)
@@ -602,20 +647,20 @@ class Client(object):
             del server_keys[server]
 
         #  short-circuit if there are no servers, just return all keys
-        if not server_keys: return(mapping.keys())
+        if not connection_keys: return(mapping.keys())
 
         notstored = [] # original keys.
-        for server, keys in server_keys.iteritems():
+        for connection, keys in connection_keys.iteritems():
             try:
                 for key in keys:
-                    line = server.readline()
+                    line = connection.readline()
                     if line == 'STORED':
                         continue
                     else:
                         notstored.append(prefixed_to_orig_key[key]) #un-mangle.
             except (_Error, socket.error), msg:
                 if type(msg) is types.TupleType: msg = msg[1]
-                server.mark_dead(msg)
+                connection.mark_dead(msg)
         return notstored
 
     def _val_to_store_info(self, val, min_compress_len):
@@ -675,9 +720,10 @@ class Client(object):
         if not store_info: return(0)
 
         fullcmd = "%s %s %d %d %d\r\n%s" % (cmd, key, store_info[0], time, store_info[1], store_info[2])
+        connection = server.connect()
         try:
-            server.send_cmd(fullcmd)
-            return(server.expect("STORED") == "STORED")
+            connection.send_cmd(fullcmd)
+            return(connection.expect("STORED") == "STORED")
         except socket.error, msg:
             if type(msg) is types.TupleType: msg = msg[1]
             server.mark_dead(msg)
@@ -696,12 +742,13 @@ class Client(object):
         self._statlog('get')
 
         try:
-            server.send_cmd("get %s" % key)
-            rkey, flags, rlen, = self._expectvalue(server)
+            connection = server.connect()
+            connection.send_cmd("get %s" % key)
+            rkey, flags, rlen, = self._expectvalue(connection)
             if not rkey:
                 return None
-            value = self._recv_value(server, flags, rlen)
-            server.expect("END")
+            value = self._recv_value(connection, flags, rlen)
+            connection.expect("END")
         except (_Error, socket.error), msg:
             if type(msg) is types.TupleType: msg = msg[1]
             server.mark_dead(msg)
@@ -752,9 +799,12 @@ class Client(object):
 
         # send out all requests on each server before reading anything
         dead_servers = []
+        connection_keys = {}
         for server in server_keys.iterkeys():
             try:
-                server.send_cmd("get %s" % " ".join(server_keys[server]))
+                connection = server.connect()
+                connection.send_cmd("get %s" % " ".join(server_keys[server]))
+                connection_keys[connection] = server_keys[server]
             except socket.error, msg:
                 if type(msg) is types.TupleType: msg = msg[1]
                 server.mark_dead(msg)
@@ -765,25 +815,27 @@ class Client(object):
             del server_keys[server]
 
         retvals = {}
-        for server in server_keys.iterkeys():
+        for connection in connection_keys.iterkeys():
             try:
-                line = server.readline()
+                line = connection.readline()
                 while line and line != 'END':
-                    rkey, flags, rlen = self._expectvalue(server, line)
+                    rkey, flags, rlen = self._expectvalue(connection, line)
                     #  Bo Yang reports that this can sometimes be None
-                    if rkey is not None:
-                        val = self._recv_value(server, flags, rlen)
-                        retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.
-                    line = server.readline()
+                    try:
+                        if rkey is not None:
+                            val = self._recv_value(connection, flags, rlen)
+                            retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.
+                    except KeyError:
+                        raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
+                    line = connection.readline()
             except (_Error, socket.error), msg:
                 if type(msg) is types.TupleType: msg = msg[1]
-                server.mark_dead(msg)
+                connection.mark_dead(msg)
         return retvals
 
     def _expectvalue(self, server, line=None):
         if not line:
             line = server.readline()
-
         if line[:5] == 'VALUE':
             resp, rkey, flags, len = line.split()
             flags = int(flags)
@@ -828,6 +880,42 @@ class Client(object):
         return val
 
 
+class _Connection(object):
+    def __init__(self, host, sfile):
+        self.host = host
+        self.sfile = sfile
+        
+    def close_socket(self):
+        self.sfile = None
+
+    def send_cmd(self, cmd):
+        self.sfile.write(cmd + '\r\n')
+
+    def send_cmds(self, cmds):
+        """ cmds already has trailing \r\n's applied """
+        self.sfile.write(cmds)
+
+    def readline(self):
+        line = self.sfile.readline()
+        if line[-2:] == '\r\n':
+            return line[:-2]
+        return line
+
+    def expect(self, text):
+        line = self.readline()
+        if line != text:
+            self.debuglog("while expecting '%s', got unexpected response '%s'" % (text, line))
+        return line
+
+    def recv(self, rlen):
+        return self.sfile.read(rlen)
+        
+    def mark_dead(self, reason):
+        return self.host.mark_dead(reason)
+        
+    def _check_dead(self):        
+        return self.host._check_dead()
+
 class _Host:
     _DEAD_RETRY = 30  # number of seconds before retrying a dead server.
     _SOCKET_TIMEOUT = 3  #  number of seconds before sockets timeout.
@@ -865,6 +953,7 @@ class _Host:
 
         self.deaduntil = 0
         self.socket = None
+        self.sfile = None
         
         self.cpool = coev.ConnectionPool(1<<23, 4.2, 4.2, 4.2, 8192, ep)
 
@@ -876,40 +965,14 @@ class _Host:
         return 0
 
     def connect(self):
-        self.sfile = self.cpool.get()
-        if self.sfile:
-            return 1
-        return 0
+        sfile = self.cpool.get()
+        #print "[%s] _Host::connect() got sfile %d" % ( coev.getpos(), id(sfile.conn))
+        return _Connection(self, sfile)
 
     def mark_dead(self, reason):
         self.debuglog("MemCache: %s: %s.  Marking dead." % (self, reason))
         self.deaduntil = time.time() + _Host._DEAD_RETRY
         self.sfile = None
-
-    def close_socket(self):
-        self.sfile = None
-
-    def send_cmd(self, cmd):
-        self.sfile.write(cmd + '\r\n')
-
-    def send_cmds(self, cmds):
-        """ cmds already has trailing \r\n's applied """
-        self.sfile.write(cmds)
-
-    def readline(self):
-        line = self.sfile.readline()
-        if line[-2:] == '\r\n':
-            return line[:-2]
-        return line
-
-    def expect(self, text):
-        line = self.readline()
-        if line != text:
-            self.debuglog("while expecting '%s', got unexpected response '%s'" % (text, line))
-        return line
-
-    def recv(self, rlen):
-        return self.sfile.read(rlen)
 
     def __str__(self):
         d = ''
@@ -957,6 +1020,7 @@ def _doctest():
         return doctest.testmod(evmemcache, globs=globs)
     except Exception, e:
         print repr(e)
+        
 
 def test_runner(prefix):
     if not prefix:

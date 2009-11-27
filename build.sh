@@ -8,7 +8,7 @@ fi
 
 mkdir -p $PREFIX || exit 1
 
-( cd libucoev && make install ) || exit 1
+( cd libucoev && make pfxinst ) || exit 1
 ( cd python2.6 && ./build.sh ) || exit 1
 [ -f ez_setup.py ] || wget http://peak.telecommunity.com/dist/ez_setup.py || exit 1
 $PREFIX/bin/python ez_setup.py || exit 1

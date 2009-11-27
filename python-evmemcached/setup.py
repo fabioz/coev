@@ -14,6 +14,7 @@ setup(name="python-evmemcached",
       url="http://code.google.com/p/coev/",
       download_url="https://coev.googlecode.com/hg/",
       py_modules=["evmemcache"],
+      zip_safe=False,
       classifiers=[
         "Development Status :: Development Status :: 4 - Beta",
         "Intended Audience :: Developers",

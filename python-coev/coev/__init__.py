@@ -43,7 +43,6 @@ class Connection(object):
                 if msg[0] == errno.EINPROGRESS:
                     wait(s.fileno(), WRITE, conn_timeout)
                 else:
-                    print msg
                     s.close()
                     raise
             else:
@@ -57,6 +56,9 @@ class Connection(object):
         
     def release(self):
         self.pool.release(self)
+        
+    def close(self):
+        self.sock.close()
         
     def __repr__(self):
         return "Connection(id={0:#08x} peer={1!r} endpoint={2!r})".format(id(self),self.sock.getpeername(), self.endpoint)
@@ -100,6 +102,7 @@ class ConnectionPool(object):
         self.read_limit = read_limit
         self.endpoints = []
         self.dead_endpoints = []
+        self.gets = 0
         for ep in endpoints:
             if len(ep) == 1:
                 self.endpoints.append((socket.AF_UNIX, socket.SOCK_STREAM, ep[0]))
@@ -114,6 +117,7 @@ class ConnectionPool(object):
                 raise ValueError("wrond endpoint format {0!r}".format(ep))
         
     def get(self):
+        self.gets += 1
         if len(self.busy) == self.conn_limit: # implies that self.available is empty
             wait_start_time = time.time()
             while len(self.busy) == self.conn_limit:
@@ -124,6 +128,9 @@ class ConnectionPool(object):
         if len(self.available) > 0:
             conn = self.available.pop()
             self.busy.append(conn)
+            if False:
+                print "[{4}] Avail {0} Busy {1} Gets {2} giving {3}".format(
+                    len(self.available), len(self.busy), self.gets, id(conn), getpos())
             return ConnectionProxy(conn)
         
         endpoints = list(self.endpoints)
@@ -133,9 +140,10 @@ class ConnectionPool(object):
             try:
                 conn = Connection(self, endpoint, self.conn_timeout, self.iop_timeout, self.read_limit)
             except Timeout:
-                pass
+                print "Timeout"
             except socket.error, e:
-                pass
+                print repr(e)
+                print len(self.busy)
             except Exception,e:
                 print repr(e)
                 raise
@@ -143,14 +151,25 @@ class ConnectionPool(object):
                 break
         if not conn:
             raise NoEndpointsConnectable
+            
         self.busy.append(conn)
+        if False:
+            print "[{4}] Avail {0} Busy {1} Gets {2} giving new {3}".format(
+                len(self.available), len(self.busy), self.gets, id(conn), getpos())
         return ConnectionProxy(conn)
         
     def release(self, conn):
         self.busy.remove(conn)
         if conn.dead is not True:
             self.available.append(conn)
+            if False:
+                print "[{4}] Avail {0} Busy {1} Gets {2} returned {3}".format(
+                    len(self.available), len(self.busy), self.gets, id(conn), getpos())
 
+    def drop_idle(self):
+        for c in self.available:
+            c.close()
+        self.available = []
 
 """
 

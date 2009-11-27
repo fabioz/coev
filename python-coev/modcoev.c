@@ -421,6 +421,7 @@ typedef struct {
     PyObject_HEAD
     cnrbuf_t dabuf;
     int busy;
+    coev_t *owner;
     int eof;
 } CoroSocketFile;
 
@@ -485,7 +486,9 @@ socketfile_read(CoroSocketFile *self, PyObject* args) {
     void *p;
     
     if (self->busy)
-        return PyErr_SetString(PyExc_CoroError, "socketfile is busy"), NULL;
+        return PyErr_Format(PyExc_CoroError, "socketfile is busy; owner=[%s] accessor=[%s]",
+            self->owner ? self->owner->treepos : "(nil?)",
+            coev_current()->treepos ), NULL;
     
     if (!PyArg_ParseTuple(args, "|n", &sizehint ))
 	return NULL;
@@ -494,6 +497,7 @@ socketfile_read(CoroSocketFile *self, PyObject* args) {
     RETURN_EMPTYSTRING_IF(self->eof);
     
     self->busy = 1;
+    self->owner = coev_current();
     Py_BEGIN_ALLOW_THREADS
     rv = cnrbuf_read(&self->dabuf, &p, sizehint);
     Py_END_ALLOW_THREADS    
@@ -520,7 +524,9 @@ socketfile_readline(CoroSocketFile *self, PyObject* args) {
     void *p;
     
     if (self->busy)
-        return PyErr_SetString(PyExc_CoroError, "socketfile is busy"), NULL;
+        return PyErr_Format(PyExc_CoroError, "socketfile is busy; owner=[%s] accessor=[%s]",
+            self->owner ? self->owner->treepos : "(nil?)",
+            coev_current()->treepos), NULL;
     
     if (!PyArg_ParseTuple(args, "|n", &sizehint ))
 	return NULL;
@@ -528,6 +534,7 @@ socketfile_readline(CoroSocketFile *self, PyObject* args) {
     RETURN_EMPTYSTRING_IF(self->eof);
     
     self->busy = 1;
+    self->owner = coev_current();
     Py_BEGIN_ALLOW_THREADS
     rv = cnrbuf_readline(&self->dabuf, &p, sizehint);
     Py_END_ALLOW_THREADS
@@ -557,12 +564,15 @@ socketfile_write(CoroSocketFile *self, PyObject* args) {
     Py_ssize_t rv, len, written;
 
     if (self->busy)
-        return PyErr_SetString(PyExc_CoroError, "socketfile is busy"), NULL;
+        return PyErr_Format(PyExc_CoroError, "socketfile is busy; owner=[%s] accessor=[%s]",
+            self->owner ? self->owner->treepos : "(nil?)",
+            coev_current()->treepos), NULL;
     
     if (!PyArg_ParseTuple(args, "s#", &str, &len))
 	return NULL;
 
     self->busy = 1;
+    self->owner = coev_current();
     Py_BEGIN_ALLOW_THREADS
     rv = coev_send(self->dabuf.fd, str, len, &written, self->dabuf.iop_timeout);
     Py_END_ALLOW_THREADS
