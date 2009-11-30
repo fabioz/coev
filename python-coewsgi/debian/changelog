@@ -1,5 +1,5 @@
-coewsgi (0.3-1) unstable; urgency=low
+python-coewsgi (0.1-1) unstable; urgency=low
 
   * Initial release
 
- -- Andrey Tatarinov <a.tatarinov@hh.ru>  Wed, 28 Oct 2009 15:28:58 +0300
+ -- Nikolay Sivko <sivko@hh.ru>  Wed, 28 Oct 2009 15:28:58 +0300

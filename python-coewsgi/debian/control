@@ -1,13 +1,14 @@
-Source: coewsgi
+Source: python-coewsgi
 Section: unknown
 Priority: extra
-Maintainer: Andrey Tatarinov <a.tatarinov@hh.ru>
-Build-Depends: debhelper (>= 7)
+Maintainer: Nikolay Sivko <sivko@hh.ru>
+Build-Depends: debhelper (>= 7), python2.6-coev
 Standards-Version: 3.8.1
-Homepage: <insert the upstream URL, if relevant>
+Homepage: http://code.google.com/p/coev/
 
-Package: coewsgi
+Package: python-coewsgi
 Architecture: all
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: <insert up to 60 chars description>
- <insert long description, indented with spaces>
+Description: Paste's http-wsgi gateway with coev support
+ Paste's http-wsgi gateway with coev support
+
