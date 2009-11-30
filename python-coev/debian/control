@@ -2,7 +2,7 @@ Source: python-libcoev
 Section: unknown
 Priority: extra
 Maintainer: Nikolay Sivko <sivko@hh.ru>
-Build-Depends: cdbs, debhelper (>= 6), python2.6-coev
+Build-Depends: cdbs, debhelper (>= 6), python2.6-coev, libucoev-dev
 Standards-Version: 3.7.3
 Homepage: http://code.google.com/p/coev/
 

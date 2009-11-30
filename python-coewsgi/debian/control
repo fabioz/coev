@@ -8,7 +8,7 @@ Homepage: http://code.google.com/p/coev/
 
 Package: python-coewsgi
 Architecture: all
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, python2.6-coev
 Description: Paste's http-wsgi gateway with coev support
  Paste's http-wsgi gateway with coev support
 
