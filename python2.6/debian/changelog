@@ -1,0 +1,12 @@
+python2.6-coev (2.6.2-2) unstable; urgency=low
+
+  * Change PREFIX to /opt/python2.6-coev
+
+ -- Nikolay Sivko <sivko@hh.ru>  Mon, 30 Nov 2009 16:44:47 +0300
+
+python2.6-coev (2.6.2-1) unstable; urgency=low
+
+  * Initial release
+
+ -- Nikolay Sivko <sivko@hh.ru>  Mon, 23 Nov 2009 18:15:46 +0300
+
