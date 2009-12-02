@@ -391,7 +391,7 @@ class Client(object):
         @param time: number of seconds any subsequent set / update commands should fail. Defaults to 0 for no delay.
         @rtype: int
         '''
-        check_key(key)
+        #check_key(key)
         server, key = self._get_server(key)
         if not server:
             return 0
@@ -449,7 +449,7 @@ class Client(object):
         return self._incrdecr("decr", key, delta)
 
     def _incrdecr(self, cmd, key, delta):
-        check_key(key)
+        #check_key(key)
         server, key = self._get_server(key)
         if not server:
             return 0
@@ -545,8 +545,8 @@ class Client(object):
         """
         # Check it just once ...
         key_extra_len=len(key_prefix)
-        if key_prefix:
-            check_key(key_prefix)
+        #if key_prefix:
+        #    check_key(key_prefix)
 
         # server (_Host) -> list of unprefixed server keys in mapping
         server_keys = {}
@@ -564,14 +564,16 @@ class Client(object):
                 server, key = self._get_server(key_prefix + str_orig_key)
 
             # Now check to make sure key length is proper ...
-            check_key(str_orig_key, key_extra_len=key_extra_len)
+            #check_key(str_orig_key, key_extra_len=key_extra_len)
 
             if not server:
                 continue
 
-            if not server_keys.has_key(server):
-                server_keys[server] = []
-            server_keys[server].append(key)
+            try:
+                server_keys[server].append(key)
+            except KeyError:
+                server_keys[server] = [key]
+
             prefixed_to_orig_key[key] = orig_key
 
         return (server_keys, prefixed_to_orig_key)
@@ -709,7 +711,7 @@ class Client(object):
         return (flags, len(val), val)
 
     def _set(self, cmd, key, val, time, min_compress_len = 0):
-        check_key(key)
+        #check_key(key)
         server, key = self._get_server(key)
         if not server:
             return 0
@@ -734,7 +736,7 @@ class Client(object):
 
         @return: The value or None.
         '''
-        check_key(key)
+        #check_key(key)
         server, key = self._get_server(key)
         if not server:
             return None
