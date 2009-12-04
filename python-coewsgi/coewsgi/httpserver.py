@@ -2,6 +2,8 @@ import socket, errno, urlparse, urllib, posixpath, sys
 import coev, thread
 from BaseHTTPServer import BaseHTTPRequestHandler
 
+import traceback
+
 SocketErrors = (socket.error,)
 
 __version__ = '0.3'
@@ -46,6 +48,10 @@ class CoevWSGIServer(object):
     def serve(self):
         self.__serving = True
         fd = self.socket.fileno()
+        if type(self.wsgi_application) is CoevStatsMiddleware:
+            statcol = self.wsgi_application
+        else:
+            statcol = None
         while self.__serving:
             while True: # while we're accepting stuff
                 try:
@@ -54,19 +60,17 @@ class CoevWSGIServer(object):
                     if e.errno == 11:
                         break
                 so.setblocking(False);
-                handler = thread.start_new_thread(self.handler, (so, ai, self, None))
+                handler = thread.start_new_thread(self.handler, (so, ai, self, None, statcol))
             # wait for connects
             try:
                 coev.wait(fd, coev.READ, self.accept_timeout)
             except (coev.WaitAbort, coev.Timeout):
                 pass
-            
 
         self.__serving = False
 
     def handler(self, *args):
         self.RequestHandlerClass(*args)
-        
 
     def shutdown(self):
         self.__serving = False
@@ -115,7 +119,7 @@ class ContinueHook(object):
         self._ContinueFile_send()
         return self._ContinueFile_rfile.readlines(sizehint)
 
-class WSGIHandlerMixin:
+class WSGIHandlerMixin(object):
     """
     WSGI mix-in for HTTPRequestHandler
 
@@ -363,7 +367,7 @@ class WSGIHandlerMixin:
 class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
     server_version = 'CoevWSGIServer/' + __version__
 
-    def __init__(self, request, client_address, server, handling_coroutine):
+    def __init__(self, request, client_address, server, handling_coroutine, stats_collector):
         self.request = request
         self.client_address = client_address
         self.server = server
@@ -372,6 +376,11 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         self.connection = self.request
         self.rfile = self.wfile = coev.socketfile(self.request.fileno(), 
             self.server.iop_timeout, self.server.max_request_size)
+            
+        self.stats_collector = stats_collector
+        if stats_collector:
+            stats_collector.incr('coewsgi.c_accepts')
+            
         try:
             self.handle()
         finally:
@@ -382,18 +391,31 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         self.handling_coroutine.throw(coev.Exit)
 
     def handle_one_request(self):
+        if self.stats_collector:
+            self.stats_collector.incr('coewsgi.c_requests')        
         try:
             self.raw_requestline = self.rfile.readline(1024)
         except coev.Timeout:
+            if self.stats_collector:
+                self.stats_collector.incr('coewsgi.c_timeouts')
             self.close_connection = 1
             return
         if not self.raw_requestline:
+            if self.stats_collector:
+                self.stats_collector.incr('coewsgi.c_readerrs')
             self.close_connection = 1
             return
         if not self.parse_request(): # An error code has been sent, just exit
+            if self.stats_collector:
+                self.stats_collector.incr('coewsgi.c_badreqs')
             self.close_connection = 1
             return
-        self.wsgi_execute()
+        try:
+            self.wsgi_execute()
+        except Exception, e:
+            if self.stats_collector:
+                self.stats_collector.incr('coewsgi.c_unhexcs')
+            sys.stderr.write(traceback.format_exc())
 
     def handle(self):
         # don't bother logging disconnects while handling a request
@@ -419,7 +441,8 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
           ssl_context=None, server_version=None, protocol_version=None,
           start_loop=True, daemon_threads=None, socket_timeout=4.2,
           use_threadpool=None, threadpool_workers=10,
-          threadpool_options=None, request_queue_size=10, response_timeout=42.23):
+          threadpool_options=None, request_queue_size=10, response_timeout=42.23,
+          server_status=None):
           
     """
     Serves your ``application`` over HTTP via WSGI interface
@@ -469,6 +492,10 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
         given client will be kept open.  At this time, it is a rude
         disconnect, but at a later time it might follow the RFC a bit
         more closely.
+        
+    ``server_status``
+    
+        This specifies path where coev/coewsgi status be output. 
 
     """
     assert not handler, "foreign handlers are prohibited"
@@ -493,6 +520,9 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
     if protocol_version:
         assert protocol_version in ('HTTP/0.9', 'HTTP/1.0', 'HTTP/1.1')
         handler.protocol_version = protocol_version
+
+    if server_status:
+        application = CoevStatsMiddleware(server_status, application)
 
     server = CoevWSGIServer(application, 
                 server_address, handler,
@@ -535,6 +565,35 @@ def server_runner(wsgi_app, global_conf, **kwargs):
     
     serve(wsgi_app, **kwargs)
     
+class CoevStatsMiddleware(object):
+    def __init__(self, path, app, **kwargs):
+        self.app = app
+        self.path = path
+        self.ext_data = {}
+    
+    def incr(self, key):
+        try:
+            self.ext_data[key] += 1
+        except KeyError:
+            self.ext_data[key]  = 1
+    
+    def index(self, environ):
+        rv = ''
+        for k,v in coev.stats().items():
+            rv += "coev.{0}={1}\n".format(k,v)
+            
+        for k,v in self.ext_data.items():
+            rv += "{0}={1}\n".format(k,v)
+            
+        return rv
+
+    def __call__(self, environ, start_response):
+        if environ.get('PATH_INFO') == self.path:
+            text = self.index(environ)
+            start_response('200 OK', [('content-type', 'text/plain'),
+                                      ('content-length', str(len(text)))])
+            return [text]
+        return self.app(environ, start_response)
 
 
 if __name__ == '__main__':
@@ -542,7 +601,7 @@ if __name__ == '__main__':
     sys.setcheckinterval(10000000)
     #coev.setdebug(True, coev.CDF_COEV | coev.CDF_COEV_DUMP |coev.CDF_RUNQ_DUMP | coev.CDF_NBUF)
     coev.setdebug(False, 0)
-    #coev.setdebug(True, 0xf | coev.CDF_NBUF)
+    #coev.setdebug(True, coev.CDF_COEV)
     sys.excepthook = sys.__excepthook__
     def dump_environ(environ, start_response):
         """
@@ -562,15 +621,18 @@ if __name__ == '__main__':
         if int(content_length):
             output.append(environ['wsgi.input'].read(int(content_length)))
             output.append("\n")
+        output.append(repr(environ))
         output = "".join(output)
         headers = [('Content-Type', 'text/plain'),
                    ('Content-Length', str(len(output)))]
         start_response("200 OK", headers)
         return [output]
+        
+    app = CoevStatsMiddleware('/stats', dump_environ)
 
     kwargs = { 'server_version': "Wombles/1.0", 'protocol_version': "HTTP/1.1", 'port': "8888" }
     kwargs['host'] = sys.argv[1]
     kwargs['port'] = sys.argv[2]
-    serve(dump_environ, **kwargs)
+    serve(app, **kwargs)
     
     
