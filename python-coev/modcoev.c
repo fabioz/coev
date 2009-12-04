@@ -856,33 +856,49 @@ mod_current(PyObject *a, PyObject *b) {
     return PyInt_FromLong( ((long)coev_current()) );
 }
 
+static int
+_add_K_to_dict(PyObject *dick, const char *key, uint64_t val) {
+    PyObject *pyval;
+    pyval = Py_BuildValue("K", val);
+    if (pyval)
+        if ( PyDict_SetItemString(dick, key, pyval) == 0 )
+            return 0;
+    
+    Py_CLEAR(dick);
+    return -1;
+}
+
 PyDoc_STRVAR(mod_stats_doc,
 "stats() -> {...}\n\n\
-Returns a dict of various counters");
+Returns a dict with instrumentation");
 
 static PyObject *
 mod_stats(PyObject *a, PyObject *b) {
-    PyObject *dick, *val;
-    uint64_t ary[COEV_STAT_COUNT];
-    int i;
+    PyObject *dick;
+    coev_instrumentation_t i;
     
-    coev_getstats(ary);
+    coev_getstats(&i);
     
     dick = PyDict_New();
     if (!dick)
-        return dick;
-    
-    for(i=0; i<COEV_STAT_COUNT; i++) {
-        val = Py_BuildValue("K", ary[i]);
-        if (!val) {
-            Py_CLEAR(dick);
-            return NULL;
-        }
-        if ( PyDict_SetItemString(dick, coev_stat_names[i], val) == -1 ) {
-            Py_CLEAR(dick);
-            return NULL;
-        }
-    }
+        return NULL;
+
+    if (_add_K_to_dict(dick, "c_ctxswaps", i.c_ctxswaps)) return NULL;
+    if (_add_K_to_dict(dick, "c_switches", i.c_switches)) return NULL;
+    if (_add_K_to_dict(dick, "c_waits", i.c_waits)) return NULL;
+    if (_add_K_to_dict(dick, "c_sleeps", i.c_sleeps)) return NULL;
+    if (_add_K_to_dict(dick, "c_stalls", i.c_stalls)) return NULL;
+    if (_add_K_to_dict(dick, "c_runqruns", i.c_runqruns)) return NULL;
+    if (_add_K_to_dict(dick, "c_news", i.c_news)) return NULL;
+    if (_add_K_to_dict(dick, "stacks_allocated", i.stacks_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "stacks_used", i.stacks_used)) return NULL;
+    if (_add_K_to_dict(dick, "cnrbufs_allocated", i.cnrbufs_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "cnrbufs_used", i.cnrbufs_used)) return NULL;
+    if (_add_K_to_dict(dick, "coevs_allocated", i.coevs_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "coevs_used", i.coevs_used)) return NULL;
+    if (_add_K_to_dict(dick, "waiters", i.waiters)) return NULL;
+    if (_add_K_to_dict(dick, "slackers", i.slackers)) return NULL;
+
     return dick;
 }
 
