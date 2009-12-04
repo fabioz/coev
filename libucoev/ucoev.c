@@ -157,6 +157,7 @@ struct _coev_scheduler_stuff {
     coev_t *runq_head;
     coev_t *runq_tail;
     int waiters;
+    int slackers;
     int stop_flag;
 } ts_scheduler;
 
@@ -236,6 +237,7 @@ _get_a_stack(size_t size) {
 #endif
         cstk_dprintf("_get_a_stack(): requested %zd allocated %zd base %p sp %p rv %p\n",
             rv->size, to_allocate, rv->base, rv->sp, rv);
+        _fm.i.stacks_allocated ++;
     } else {
         /* remove from the avail list if we took it from there */
         if (prev_avail)
@@ -244,7 +246,6 @@ _get_a_stack(size_t size) {
         else
             /* head of the avail list */
             ts_stack_bunch.avail = rv->next;
-        _fm.stacks_free --;        
     }
     
     /* add to the head of the busy list */
@@ -259,7 +260,7 @@ _get_a_stack(size_t size) {
     ts_stack_bunch.busy = rv;
     cstk_dump("_get_a_stack: resulting");
     
-    _fm.stacks_used ++;
+    _fm.i.stacks_used ++;
     return rv;
 }
 
@@ -287,8 +288,7 @@ _return_a_stack(coevst_t *sp) {
     
     cstk_dump("_return_a_stack: resulting");
     
-    _fm.stacks_free ++;
-    _fm.stacks_used --;
+    _fm.i.stacks_used --;
 }
 
 static void
@@ -318,8 +318,7 @@ _free_stacks(void) {
         spb = spbn;
         
     }
-    _fm.stacks_free = 0;
-    _fm.stacks_used = 0;
+    _fm.i.stacks_allocated = 0;
 }
 
 /* the last, I hope, custom allocator, for the coev_t-s themselves. */
@@ -341,7 +340,7 @@ _get_a_coev(void) {
         rv = malloc(sizeof(coev_t));
         if (rv == NULL)
            _fm.abort("_get_a_coev(): malloc() failed");
-        
+        _fm.i.coevs_allocated ++;
     } else {
         /* remove from the avail list if we took it from there */
         if (prev_avail)
@@ -350,7 +349,6 @@ _get_a_coev(void) {
         else
             /* head of the avail list */        
             ts_coev_bunch.avail = rv->cb_next;
-        _fm.coevs_free --;        
     }
     
     /* add to the head of the busy list */
@@ -363,7 +361,7 @@ _get_a_coev(void) {
     rv->cb_next = ts_coev_bunch.busy;
     ts_coev_bunch.busy = rv;
     
-    _fm.coevs_used ++;
+    _fm.i.coevs_used ++;
 
     return rv;
 }
@@ -394,9 +392,8 @@ _return_a_coev(coev_t *sp) {
     
     sp->cb_next = ts_coev_bunch.avail;
     ts_coev_bunch.avail = sp;
-    
-    _fm.coevs_free ++;
-    _fm.coevs_used --;
+
+    _fm.i.coevs_used --;
 }
 
 static void
@@ -418,8 +415,7 @@ _free_coevs(void) {
         spb = spbn;
     }
     /* after this point all pointers to coev_t-s are totally invalid. */
-    _fm.coevs_free = 0;
-    _fm.coevs_used = 0;
+    _fm.i.coevs_allocated = 0;
 }
 
 /* end of coev_t allocator */
@@ -462,6 +458,7 @@ coev_init_root(coev_t *root) {
 #ifdef THREADING_MADNESS
     root->thread = pthread_self();
 #endif
+    _fm.i.c_news++;
 }
 
 /** universal runner */
@@ -522,6 +519,8 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     ev_init(&child->watcher, io_callback);
     ev_timer_init(&child->io_timer, iotimeout_callback, 23., 42.);
     ev_timer_init(&child->sleep_timer, sleep_callback, 23., 42.);
+    
+    _fm.i.c_news ++;
     
     return child;
 }
@@ -688,7 +687,6 @@ coev_switch(coev_t *target) {
     target->state = CSTATE_CURRENT;
     target->status = CSW_VOLUNTARY;
     ts_current = target;
-    _fm.c_switches++;
     
     cstk_dump("before switch\n");
     
@@ -696,6 +694,8 @@ coev_switch(coev_t *target) {
         _fm.abort("coev_switch(): swapcontext() failed.");
     
     cstk_dump("after switch\n");
+    _fm.i.c_switches++;
+    _fm.i.c_ctxswaps++;
 }
 
 static void
@@ -749,7 +749,7 @@ static void
 coev_initialstub(void) {
     coev_t *self = (coev_t*)ts_current;
     coev_t *parent;
-    
+
     self->run(self);
     
     /* clean up any scheduler stuff */
@@ -872,11 +872,13 @@ coev_schedule(coev_t *waiter) {
     coev_runq_append(waiter);
     coev_dprintf("coev_schedule: [%s] %s scheduled.\n",
         waiter->treepos, str_coev_state[waiter->state]);
+    ts_scheduler.slackers++;
     return 0;
 }
 
 int
 coev_stall(void) {
+    _fm.i.c_stalls ++;
     if (ts_scheduler.scheduler) {
         int rv;
         rv = coev_schedule((coev_t *)ts_current);
@@ -929,7 +931,7 @@ iotimeout_callback(struct ev_loop *loop, ev_timer *w, int revents) {
     waiter->state = CSTATE_SCHEDULED;
     waiter->status = CSW_TIMEOUT; /* this is timeout */    
     coev_runq_append(waiter);
-    ts_scheduler.waiters -= 1;
+    ts_scheduler.waiters--;
     
     coev_dprintf("iotimeout_callback(): [%s].\n", waiter->treepos);
 }
@@ -943,7 +945,7 @@ sleep_callback(struct ev_loop *loop, ev_timer *w, int revents) {
     waiter->state = CSTATE_SCHEDULED;
     waiter->status = CSW_WAKEUP; /* this is scheduled */
     coev_runq_append(waiter);
-    ts_scheduler.waiters -= 1;
+    ts_scheduler.waiters--;
     
     coev_dprintf("sleep_callback(): [%s]\n", waiter->treepos);
 }
@@ -997,7 +999,7 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
         /* this is sleep */
         self->sleep_timer.repeat = timeout;
         ev_timer_again(ts_scheduler.loop, &self->sleep_timer);
-        _fm.c_sleeps++;
+        _fm.i.c_sleeps++;
         self->state = CSTATE_SLEEP;
     } else {
         /* this is iowait */
@@ -1005,7 +1007,7 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
         ev_timer_again(ts_scheduler.loop, &self->io_timer);
         ev_io_init(&self->watcher, io_callback, fd, revents);
         ev_io_start(ts_scheduler.loop, &self->watcher);
-        _fm.c_waits++;
+        _fm.i.c_waits++;
         self->state = CSTATE_IOWAIT;
     }
     
@@ -1017,6 +1019,7 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
     ts_scheduler.scheduler->origin = self;
     ts_current = ts_scheduler.scheduler;
     
+    _fm.i.c_ctxswaps++;
     cstk_dump("before swapcontext\n");
     if (swapcontext(&self->ctx, &ts_scheduler.scheduler->ctx) == -1)
         _fm.abort("coev_scheduled_switch(): swapcontext() failed.");
@@ -1097,6 +1100,10 @@ coev_loop(void) {
         ts_scheduler.runq_head = ts_scheduler.runq_tail = NULL;
         
         coev_dprintf("coev_loop(): running the queue.\n");
+        _fm.i.c_runqruns ++;
+        _fm.i.waiters = ts_scheduler.waiters;
+        _fm.i.slackers = ts_scheduler.slackers;
+        ts_scheduler.slackers = 0;
         
 	while ((target = runq_head)) {
             coev_dprintf("coev_loop(): runqueue run: target %p head %p next %p\n", target, runq_head, target->rq_next);
@@ -1121,7 +1128,8 @@ coev_loop(void) {
             cstk_dump("before swapcontext");
             cstk_dprintf("target's sp %p origin's sp %p\n", target->ctx.uc_stack.ss_sp,
                 target->origin->ctx.uc_stack.ss_sp);
-
+            
+            _fm.i.c_ctxswaps ++;
             if (swapcontext(&target->origin->ctx, &target->ctx) == -1)
                 _fm.abort("coev_scheduler(): swapcontext() failed.");
             
@@ -1348,9 +1356,9 @@ colock_acquire(colock_t *p, int wf) {
         if (p->queue_head)
             p->queue_head->lq_next = p->queue_head;
         ts_current->lq_next = p->queue_head;
-        p->queue_head = ts_current;
+        p->queue_head = (coev_t *)ts_current;
         if (!p->queue_tail)
-            p->queue_tail = ts_current;
+            p->queue_tail = (coev_t *)ts_current;
         
         /* switch somewhere */
         ts_current->state = CSTATE_LOCKWAIT;
@@ -1514,11 +1522,15 @@ cnrbuf_init(cnrbuf_t *self, int fd, double timeout, size_t prealloc, size_t rlim
     if (!self->in_buffer)
 	_fm.abort("cnrbuf_init(): No memory for me!");
     self->in_position = self->in_buffer;
+    _fm.i.cnrbufs_allocated ++;
+    _fm.i.cnrbufs_used ++;
 }
 
 void 
 cnrbuf_fini(cnrbuf_t *buf) {
     _fm.free(buf->in_buffer);
+    _fm.i.cnrbufs_allocated --;
+    _fm.i.cnrbufs_used --;
 }
 
 static void
@@ -1855,27 +1867,9 @@ coev_send(int fd, const void *data, ssize_t len, ssize_t *rv, double timeout) {
     return to_write == 0 ? 0 : -1;
 }
 
-const char const *coev_stat_names[] = {
-    "switches",
-    "waits",
-    "sleeps",
-    "stacks.free",
-    "stacks.used",
-    "coevs.free",
-    "coevs.used",
-    "coevs.dead",
-};
-
 void
-coev_getstats(uint64_t *ptr) {
-    ptr[0] = _fm.c_switches;
-    ptr[1] = _fm.c_waits;
-    ptr[2] = _fm.c_sleeps;
-    ptr[3] = _fm.stacks_free;
-    ptr[4] = _fm.stacks_used;
-    ptr[5] = _fm.coevs_free;
-    ptr[6] = _fm.coevs_used;
-    ptr[7] = _fm.coevs_dead;
+coev_getstats(coev_instrumentation_t *ptr) {
+    memmove(ptr, &_fm.i, sizeof(coev_instrumentation_t));
 }
 
 void
@@ -1927,21 +1921,14 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     ts_count = 1;
     
     memcpy(&_fm, (void *)fm, sizeof(coev_frameth_t));
-    
-    _fm.c_switches = 0;
-    _fm.c_waits = 0;
-    _fm.c_sleeps = 0;
-    _fm.stacks_free = 0;
-    _fm.stacks_used = 0;
-    _fm.coevs_free = 0;
-    _fm.coevs_used = 0;
-    _fm.coevs_dead = 0; /* active = used - dead */
+    memset(&_fm.i, 0, sizeof(coev_instrumentation_t));
     
     ts_scheduler.loop = ev_default_loop(0);
     ts_scheduler.scheduler = NULL;
     ts_scheduler.runq_head = NULL;
     ts_scheduler.runq_tail = NULL;
     ts_scheduler.waiters = 0;
+    ts_scheduler.slackers = 0;
     
     ts_cls_last_key = 1L;
     

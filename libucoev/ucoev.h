@@ -167,8 +167,6 @@ struct _coev {
     In the absence of designated scheduler coroutine, switches are perfomed to 'root'
     coroutine (created at the time of coev_initialize())
     
-    FIXME: explicit scheduling rework.
-    
     THREAD SAFETY
     
     In order to be safe, do not use threads.
@@ -176,7 +174,29 @@ struct _coev {
     Failure to observe that will be reported with crossthread_fail callback.
     
 */
-
+typedef struct _coev_instrumentation {
+    /* counters */
+    volatile uint64_t c_ctxswaps;
+    
+    volatile uint64_t c_switches;
+    volatile uint64_t c_waits;
+    volatile uint64_t c_sleeps;
+    volatile uint64_t c_stalls;
+    
+    volatile uint64_t c_runqruns;
+    volatile uint64_t c_news;
+    
+    /* gauges */
+    volatile uint64_t stacks_allocated;
+    volatile uint64_t stacks_used;
+    volatile uint64_t cnrbufs_allocated;
+    volatile uint64_t cnrbufs_used;
+    volatile uint64_t coevs_allocated;
+    volatile uint64_t coevs_used;
+    
+    volatile uint64_t waiters;
+    volatile uint64_t slackers;
+} coev_instrumentation_t;
 
 /* memory management + error reporting to use */
 typedef struct _coev_framework_methods {
@@ -201,15 +221,8 @@ typedef struct _coev_framework_methods {
     /* debug output bitmask*/
     int debug;
     
-    /* statistics: */
-    volatile uint64_t c_switches;
-    volatile uint64_t c_waits;
-    volatile uint64_t c_sleeps;
-    volatile uint64_t stacks_free;
-    volatile uint64_t stacks_used;
-    volatile uint64_t coevs_free;
-    volatile uint64_t coevs_used;
-    volatile uint64_t coevs_dead;
+    /* instrumentation */
+    coev_instrumentation_t i;
     
 } coev_frameth_t;
 
@@ -355,9 +368,7 @@ void cnrbuf_done(cnrbuf_t *buf, ssize_t eaten);
 int coev_send(int fd, const void *data, ssize_t dlen, ssize_t *sent, double timeout);
 
 /* libwide stuff */
-#define COEV_STAT_COUNT 8
-extern const char const *coev_stat_names[];
-void coev_getstats(uint64_t *ary);
+void coev_getstats(coev_instrumentation_t *i);
 
 
 #define CDF_COEV         0x001   /* switches */
