@@ -1,0 +1,11 @@
+python-coewsgi (0.1-2) unstable; urgency=low
+
+  * Fix debian dependencies
+
+ -- Nikolay Sivko <sivko@hh.ru>  Mon, 30 Nov 2009 18:29:12 +0300
+
+python-coewsgi (0.1-1) unstable; urgency=low
+
+  * Initial release
+
+ -- Nikolay Sivko <sivko@hh.ru>  Wed, 28 Oct 2009 15:28:58 +0300

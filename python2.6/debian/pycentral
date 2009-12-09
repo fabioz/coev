@@ -1,0 +1,4 @@
+[python2.6-coev]
+runtime: python2.6-coev
+interpreter: /usr/bin/python2.6-coev
+prefix: /usr/lib/python2.6-coev

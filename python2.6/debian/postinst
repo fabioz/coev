@@ -1,0 +1,10 @@
+#! /bin/sh -e
+
+if [ "$1" = configure ]; then
+    (
+	wget -O /tmp/ez_setup.py http://peak.telecommunity.com/dist/ez_setup.py || exit 1
+	/opt/python2.6-coev/bin/python /tmp/ez_setup.py || exit 1
+    )
+fi
+
+exit 0

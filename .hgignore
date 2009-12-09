@@ -1,0 +1,7 @@
+#syntax: regexp
+
+^.+\.(pyc|o|so|a|orig|~|log|status)$
+^[^/]+/build/
+^[^/]+/.+\.egg-info/
+^[^/]+/dist/
+

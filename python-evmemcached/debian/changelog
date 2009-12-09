@@ -1,0 +1,5 @@
+python-evmemcached (0.1-2) unstable; urgency=low
+
+  * Initial release
+
+ -- Nikolay Sivko <sivko@hh.ru>  Mon, 30 Nov 2009 18:29:12 +0300
