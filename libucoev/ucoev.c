@@ -42,6 +42,7 @@ static coev_frameth_t _fm;
 static char *dmesg = NULL;
 static char *dm_cp = NULL; /* points at the first 0 byte in the dmesg */
 static struct timeval started_at;
+static int _ev_initialized = 0;
 
 static void
 flush_dmesg(void) {
@@ -449,10 +450,6 @@ coev_init_root(coev_t *root) {
     root->child_count = 0;
     root->being_joined = 0;
     
-    ev_init(&root->watcher, io_callback);
-    ev_timer_init(&root->io_timer, iotimeout_callback, 23., 42.);
-    ev_timer_init(&root->sleep_timer, sleep_callback, 23., 42.);
-    
     update_treepos(root);
     
 #ifdef THREADING_MADNESS
@@ -464,6 +461,7 @@ coev_init_root(coev_t *root) {
 /** universal runner */
 static void coev_initialstub(void);
 static void cls_keychain_init(cokeychain_t **);
+static void coev_evinit(void);
 
 /** return a ready-to-run coroutine
 Note: stack is allocated using anonymous mmap, so be generous, it won't
@@ -472,6 +470,9 @@ coev_t *
 coev_new(coev_runner_t runner, size_t stacksize) {
     coevst_t *cstack;
     coev_t *child;
+    
+    if (!_ev_initialized)
+        coev_evinit();
     
     if (ts_current == NULL)
         _fm.abort("coev_init(): library not initialized");
@@ -1922,21 +1923,9 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     
     memcpy(&_fm, (void *)fm, sizeof(coev_frameth_t));
     memset(&_fm.i, 0, sizeof(coev_instrumentation_t));
-    
-    ts_scheduler.loop = ev_default_loop(0);
-    ts_scheduler.scheduler = NULL;
-    ts_scheduler.runq_head = NULL;
-    ts_scheduler.runq_tail = NULL;
-    ts_scheduler.waiters = 0;
-    ts_scheduler.slackers = 0;
+    memset(&ts_scheduler, 0, sizeof(ts_scheduler));
     
     ts_cls_last_key = 1L;
-    
-    if (_fm.inthdlr) {
-        ev_signal_init(&ts_scheduler.intsig, intsig_cb, SIGINT);
-        ev_signal_start(ts_scheduler.loop, &ts_scheduler.intsig);
-        ev_unref(ts_scheduler.loop);
-    }
     
     ts_rootlockbunch = NULL;
     colock_bunch_init(&ts_rootlockbunch);
@@ -1952,10 +1941,30 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
         _fm.abort("coev_libinit(): dmesg allocation failed.");
     memset(dmesg, 0, _fm.dm_size);
     
-    
-    
     coev_init_root(root);
     gettimeofday(&started_at, NULL);
+}
+
+/* libev is initialized separately and lazily.
+   see comment on coev_fork_notify() */
+static void
+coev_evinit(void) {
+    if (_ev_initialized)
+        return;
+    
+    ts_scheduler.loop = ev_default_loop(0);
+    
+    if (_fm.inthdlr) {
+        ev_signal_init(&ts_scheduler.intsig, intsig_cb, SIGINT);
+        ev_signal_start(ts_scheduler.loop, &ts_scheduler.intsig);
+        ev_unref(ts_scheduler.loop);
+    }
+    
+    ev_init(&ts_root->watcher, io_callback);
+    ev_timer_init(&ts_root->io_timer, iotimeout_callback, 23., 42.);
+    ev_timer_init(&ts_root->sleep_timer, sleep_callback, 23., 42.);
+    
+    _ev_initialized = 0x82342;
 }
 
 void
@@ -1964,6 +1973,7 @@ coev_libfini(void) {
     if (ts_current != ts_root)
 	_fm.abort("coev_libfini() must be called only in root coro.");
     coev_dprintf("coev_libfini(): bye bye");
+    ev_default_destroy();
     colock_bunch_fini(ts_rootlockbunch);
     cls_keychain_fini(ts_current->kc.next);
     _free_stacks(); /* this effectively kills all coroutines, unbeknowst to them. */
@@ -1973,6 +1983,12 @@ coev_libfini(void) {
     dmesg = NULL;
 }
 
+/* if typical daemonize() closes all fds after library has been initialized,
+   and then something opens files before ev_loop() has a chance to run, ev_loop() 
+   will close it's fd from before fork which is now used by something else.
+   it will also most probably get it back on epoll_create() which will cause
+   even more confusion.
+ */
 void coev_fork_notify(void) {
     ev_default_fork();
 }
