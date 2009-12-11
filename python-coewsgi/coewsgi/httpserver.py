@@ -394,7 +394,7 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         if self.stats_collector:
             self.stats_collector.incr('coewsgi.c_requests')        
         try:
-            self.raw_requestline = self.rfile.readline(1024)
+            self.raw_requestline = self.rfile.readline(8192)
         except coev.Timeout:
             if self.stats_collector:
                 self.stats_collector.incr('coewsgi.c_timeouts')
@@ -526,8 +526,8 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
 
     server = CoevWSGIServer(application, 
                 server_address, handler,
-                request_queue_size, float(socket_timeout),
-                float(response_timeout) )
+                request_queue_size, 
+                socket_timeout, response_timeout)
 
     protocol = 'http'
     host, port = server.server_address
@@ -556,9 +556,12 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
 # arguments (though that's not much of an issue yet, ever?)
 def server_runner(wsgi_app, global_conf, **kwargs):
     from paste.deploy.converters import asbool
-    for name in ['port', 'socket_timeout']:
+    for name in ['port', 'request_queue']:
         if name in kwargs:
             kwargs[name] = int(kwargs[name])
+    for name in ['socket_timeout', 'request_timeout']:
+        if name in kwargs:
+            kwargs[name] = float(kwargs[name])
     if ('error_email' not in kwargs
         and 'error_email' in global_conf):
         kwargs['error_email'] = global_conf['error_email']
