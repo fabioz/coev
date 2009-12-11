@@ -556,7 +556,7 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
 # arguments (though that's not much of an issue yet, ever?)
 def server_runner(wsgi_app, global_conf, **kwargs):
     from paste.deploy.converters import asbool
-    for name in ['port', 'request_queue']:
+    for name in ['port', 'request_queue_size']:
         if name in kwargs:
             kwargs[name] = int(kwargs[name])
     for name in ['socket_timeout', 'request_timeout']:
