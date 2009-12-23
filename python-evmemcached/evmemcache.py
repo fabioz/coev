@@ -85,6 +85,7 @@ import re
 import types
 import errno
 import coev
+import thread
 
 try:
     import cPickle as pickle
@@ -757,7 +758,7 @@ class Client(object):
             return None
         return value
 
-    def get_multi(self, keys, key_prefix=''):
+    def _old_get_multi(self, keys, key_prefix=''):
         '''
         Retrieves multiple keys from the memcache doing just one query.
 
@@ -822,7 +823,6 @@ class Client(object):
                 line = connection.readline()
                 while line and line != 'END':
                     rkey, flags, rlen = self._expectvalue(connection, line)
-                    #  Bo Yang reports that this can sometimes be None
                     try:
                         if rkey is not None:
                             val = self._recv_value(connection, flags, rlen)
@@ -834,6 +834,42 @@ class Client(object):
                 if type(msg) is types.TupleType: msg = msg[1]
                 connection.mark_dead(msg)
         return retvals
+
+    def get_multi_worker(self, server, keys):
+        connection = server.get()
+        connection.send_cmd("get %s" % " ".join(server_keys))
+        line = connection.readline()
+        retvals = {}
+        while line and line != 'END':
+            rkey, flags, rlen = self._expectvalue(connection, line)
+            try:
+                if rkey is not None:
+                    val = self._recv_value(connection, flags, rlen)
+                    retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.
+            except KeyError:
+                raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
+            line = connection.readline()
+        return retvals
+
+    def get_multi(self, keys, key_prefix=''):
+        self._statlog('mget_multi')
+
+        server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(keys, key_prefix)
+
+        for server, keys in server_keys.items():
+            thread.start_new_thread(self.get_multi_worker, (server, keys))
+
+        # wait for workers to die
+        wcount = len(server_keys)
+        retval = {}
+        while wcount > 0:
+            wcount -= 1
+            try:
+                retval.update(coev.switch2scheduler())
+            except:
+                pass
+
+        return retval
 
     def _expectvalue(self, server, line=None):
         if not line:
@@ -1013,10 +1049,9 @@ def check_key(key, key_extra_len=0):
             if ord(char) <= 32 or ord(char) == 127:
                 raise Client.MemcachedKeyCharacterError, "Control characters not allowed"
 
-def _doctest():
+def _doctest(servers):
     import doctest, evmemcache
     try:
-        servers = ["127.0.0.1:11211"]
         mc = Client(servers, debug=1)
         globs = {"mc": mc}
         return doctest.testmod(evmemcache, globs=globs)
@@ -1024,13 +1059,12 @@ def _doctest():
         print repr(e)
         
 
-def test_runner(prefix):
+def test_runner(prefix, serverList):
     if not prefix:
         print "Testing docstrings..."
-        _doctest()
+        _doctest(serverList[0])
     print "Running tests:"
     print
-    serverList = [["127.0.0.1:11211"]]
     if '--do-unix' in sys.argv:
         serverList.append([os.path.join(os.getcwd(), 'memcached.socket')])
 
@@ -1174,9 +1208,9 @@ if __name__ == "__main__":
     import thread
     thread.start_new_thread(test_runner,(None,))
     coev.scheduler()
-    
+    serverList = [["127.0.0.1:11211", "127.0.0.1:11311", "127.0.0.1:11411" ]]    
     for i in xrange(15):
-        thread.start_new_thread(test_runner,("c%dx:" % (i,),))
+        thread.start_new_thread(test_runner,("c%dx:" % (i,),serverList))
     coev.scheduler()
 
 
