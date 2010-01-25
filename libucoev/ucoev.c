@@ -751,6 +751,12 @@ coev_initialstub(void) {
 
     self->run(self);
     
+    coev_dprintf("[%s] dead: parent [%s] origin [%s] A=%p X=%p Y=%p S=%p\n",
+        self->treepos, 
+        (self->parent != NULL) ?  self->parent->treepos : "<null parent>",
+        (self->origin != NULL) ?  self->origin->treepos : "<null origin>",
+        self->A, self->X, self->Y, self->S );
+    
     /* clean up any scheduler stuff */
     coev_stop_watchers(self);
     
