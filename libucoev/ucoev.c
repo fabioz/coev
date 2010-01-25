@@ -380,10 +380,10 @@ _return_a_coev(coev_t *sp) {
         if (ts_coev_bunch.busy)
             ts_coev_bunch.busy->cb_prev = NULL;
     }
-
+/*
     sp->state = CSTATE_ZERO;
     sp->status = CSW_NONE;
-    
+*/  
     /* 2. add to avail list */
     sp->cb_prev = NULL; /* not used in avail list */
     
@@ -766,10 +766,14 @@ coev_initialstub(void) {
     
     /* release resources */
     parent = _coev_sweep(self);
-    
+
+#if EXPLICIT_JOINS    
     if (ts_scheduler.scheduler && ( !(self->being_joined))) {
         parent = ts_scheduler.scheduler;
-    } else {    
+    } else {
+#else
+    {
+#endif
         /* find switchable target by ignoring dead and busy coroutines */
         while (    (parent != NULL)
                 && (parent->state != CSTATE_RUNNABLE) )
@@ -788,7 +792,9 @@ coev_initialstub(void) {
     parent->status = CSW_SIGCHLD;
     parent->origin = self;
     ts_current = parent;
-    
+
+    coev_dprintf("coev_initialstub(): switching to [%s]\n", parent->treepos);    
+
     setcontext(&parent->ctx);
     
     _fm.abort("coev_initialstub(): setcontext() returned. This cannot be.");
@@ -1085,7 +1091,7 @@ coev_sleep(ev_tstamp amount) {
 
 coev_t *
 coev_loop(void) {
-    coev_dprintf("coev_loop(): scheduler entered.\n");
+    coev_dprintf("[%s] coev_loop(): scheduler entered.\n", ts_current->treepos);
     
     if (ts_scheduler.scheduler)
         return ts_scheduler.scheduler;
@@ -1098,33 +1104,38 @@ coev_loop(void) {
         
         
 	runq_dump("coev_loop(): runqueue before running it");
-        coev_dprintf("coev_loop(): %d waiters\n", ts_scheduler.waiters);
+        coev_dprintf("[%s] coev_loop(): %d waiters\n", 
+            ts_current->treepos, ts_scheduler.waiters);
 	
         /* guard against infinite loop in scheduler in case something 
            schedules itself over and over */
 	runq_head = ts_scheduler.runq_head;
         ts_scheduler.runq_head = ts_scheduler.runq_tail = NULL;
         
-        coev_dprintf("coev_loop(): running the queue.\n");
+        coev_dprintf("[%s] coev_loop(): running the queue.\n",
+            ts_current->treepos);
         _fm.i.c_runqruns ++;
         _fm.i.waiters = ts_scheduler.waiters;
         _fm.i.slackers = ts_scheduler.slackers;
         ts_scheduler.slackers = 0;
         
 	while ((target = runq_head)) {
-            coev_dprintf("coev_loop(): runqueue run: target %p head %p next %p\n", target, runq_head, target->rq_next);
+            coev_dprintf("[%s] coev_loop(): runqueue run: target %p head %p next %p\n", 
+                ts_current->treepos, target, runq_head, target->rq_next);
 	    runq_head = target->rq_next;
             if (runq_head == target)
                 _fm.abort("coev_loop(): runqueue loop detected");
 	    target->rq_next = NULL;
             
             if ((target->state != CSTATE_RUNNABLE) && (target->state != CSTATE_SCHEDULED)) {
-                coev_dprintf("coev_scheduler(): [%s] is %s, skipping.\n",
-                        target->treepos, str_coev_state[target->state]);
+                coev_dprintf("[%s] coev_loop(): [%s] is %s, skipping.\n",
+                    ts_current->treepos, target->treepos, str_coev_state[target->state]);
                 continue;
             }
-            coev_dprintf("coev_scheduler(): switching to [%s] %s %s\n",
-                    target->treepos, str_coev_state[target->state], str_coev_status[target->status]);
+            coev_dprintf("[%s] coev_loop(): switching to [%s] %s %s\n",
+                ts_current->treepos, target->treepos, 
+                str_coev_state[target->state], 
+                str_coev_status[target->status]);
             
             ts_current->state = CSTATE_RUNNABLE;
             target->origin = (coev_t *) ts_current;
@@ -1137,7 +1148,7 @@ coev_loop(void) {
             
             _fm.i.c_ctxswaps ++;
             if (swapcontext(&target->origin->ctx, &target->ctx) == -1)
-                _fm.abort("coev_scheduler(): swapcontext() failed.");
+                _fm.abort("coev_loop(): swapcontext() failed.");
             
             cstk_dump("after swapcontext\n");
             cstk_dprintf("current sp %p origin's sp %p\n", ts_current->ctx.uc_stack.ss_sp,
@@ -1145,10 +1156,14 @@ coev_loop(void) {
             
             switch (ts_current->status) {
                 case CSW_VOLUNTARY:
-                    coev_dprintf("coev_loop(): yield from %p [%s]\n", ts_current->origin, ts_current->origin->treepos);
+                    coev_dprintf("[%s] coev_loop(): yield from %p [%s]\n", 
+                        ts_current->treepos, ts_current->origin, 
+                        ts_current->origin->treepos);
                     break;
                 case CSW_SIGCHLD:
-                    coev_dprintf("coev_loop(): sigchld from %p [%s] ignored.\n", ts_current->origin, ts_current->origin->treepos);
+                    coev_dprintf("[%s] coev_loop(): sigchld from %p [%s] ignored.\n", 
+                         ts_current->treepos, ts_current->origin, 
+                         ts_current->origin->treepos);
                     break;
                 default:
                     coev_dprintf("Unexpected switch to scheduler (i'm [%s])\n", ts_current->treepos);
@@ -1159,7 +1174,8 @@ coev_loop(void) {
 	}
         
 	runq_dump("coev_loop(): runqueue after running it");
-        coev_dprintf("coev_loop(): %d waiters\n", ts_scheduler.waiters);
+        coev_dprintf("[%s] coev_loop(): %d waiters\n", 
+            ts_current->treepos, ts_scheduler.waiters);
         
 	if (ts_scheduler.runq_head != NULL) 
 	    ev_loop(ts_scheduler.loop, EVLOOP_NONBLOCK);
@@ -1171,7 +1187,7 @@ coev_loop(void) {
     } while (!ts_scheduler.stop_flag);
     
     ts_scheduler.scheduler = NULL;
-    coev_dprintf("coev_loop(): scheduler exited.\n");
+    coev_dprintf("[%s] coev_loop(): scheduler exited.\n", ts_current->treepos);
     return NULL;
 }
 
