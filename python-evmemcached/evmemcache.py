@@ -972,7 +972,7 @@ class _Host:
             host, self.weight, conn_limit, conn_timeout, conn_busy_wait, iop_timeout = host
         else:
             self.weight = 1
-            pool_size = 32
+            conn_limit = 32
             conn_timeout = 1.0
             conn_busy_wait = 1.0
             iop_timeout = 1.0
@@ -1007,7 +1007,7 @@ class _Host:
         self.socket = None
         self.sfile = None
         
-        self.cpool = coev.ConnectionPool(pool_size, conn_busy_wait, conn_timeout, iop_timeout, read_limit, ep)
+        self.cpool = coev.ConnectionPool(conn_limit, conn_busy_wait, conn_timeout, iop_timeout, read_limit, ep)
 
 
     def _check_dead(self):
