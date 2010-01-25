@@ -86,6 +86,7 @@ import types
 import errno
 import coev
 import thread
+import logging
 
 try:
     import cPickle as pickle
@@ -621,7 +622,8 @@ class Client(object):
         '''
 
         self._statlog('set_multi')
-
+        el = logging.getLogger('evmemc.set_multi')
+        el.debug('entered')
 
 
         server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(mapping.iterkeys(), key_prefix)
@@ -835,21 +837,25 @@ class Client(object):
                 connection.mark_dead(msg)
         return retvals
 
-    def get_multi_worker(self, server, keys):
-        connection = server.get()
-        connection.send_cmd("get %s" % " ".join(server_keys))
-        line = connection.readline()
-        retvals = {}
-        while line and line != 'END':
-            rkey, flags, rlen = self._expectvalue(connection, line)
-            try:
-                if rkey is not None:
-                    val = self._recv_value(connection, flags, rlen)
-                    retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.
-            except KeyError:
-                raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
+    def get_multi_worker(self, server, keys, prefixed_to_orig_key):
+        el = logging.getLogger("evmemc.get_multi_worker")
+        try:
+            connection = server.get()
+            connection.send_cmd("get %s" % " ".join(keys))
             line = connection.readline()
-        return retvals
+            retvals = {}
+            while line and line != 'END':
+                rkey, flags, rlen = self._expectvalue(connection, line)
+                try:
+                    if rkey is not None:
+                        val = self._recv_value(connection, flags, rlen)
+                        retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.
+                except KeyError:
+                    raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
+                line = connection.readline()
+            return retvals
+        except:
+            el.exception("worker: ")
 
     def get_multi(self, keys, key_prefix=''):
         self._statlog('mget_multi')
@@ -857,7 +863,7 @@ class Client(object):
         server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(keys, key_prefix)
 
         for server, keys in server_keys.items():
-            thread.start_new_thread(self.get_multi_worker, (server, keys))
+            thread.start_new_thread(self.get_multi_worker, (server, keys, prefixed_to_orig_key))
 
         # wait for workers to die
         wcount = len(server_keys)
@@ -956,13 +962,17 @@ class _Connection(object):
 
 class _Host:
     _DEAD_RETRY = 30  # number of seconds before retrying a dead server.
-    _SOCKET_TIMEOUT = 3  #  number of seconds before sockets timeout.
 
     def __init__(self, host, debugfunc=None):
         if isinstance(host, types.TupleType):
-            host, self.weight = host
+            host, self.weight, conn_limit, conn_timeout, conn_busy_wait, iop_timeout = host
         else:
             self.weight = 1
+            pool_size = 32
+            conn_timeout = 1.0
+            conn_busy_wait = 1.0
+            iop_timeout = 1.0
+        read_limit = 8192
 
         #  parse the connection string
         m = re.match(r'^(?P<proto>unix):(?P<path>.*)$', host)
@@ -993,7 +1003,7 @@ class _Host:
         self.socket = None
         self.sfile = None
         
-        self.cpool = coev.ConnectionPool(1<<23, 4.2, 4.2, 4.2, 8192, ep)
+        self.cpool = coev.ConnectionPool(pool_size, conn_busy_wait, conn_timeout, iop_timeout, read_limit, ep)
 
 
     def _check_dead(self):
