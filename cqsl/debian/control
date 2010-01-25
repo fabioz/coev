@@ -1,0 +1,12 @@
+Source: python-cqsl
+Section: unknown
+Priority: extra
+Maintainer: Nikolay Sivko <sivko@hh.ru>
+Build-Depends: cdbs, debhelper (>= 6), python2.6-coev, libapr1-dev
+Standards-Version: 3.7.3
+Homepage: http://code.google.com/p/coev/
+
+Package: python-cqsl
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, python2.6-coev, libapr1
+Description: C version of {cgi|urlparse}.parse_qs[l]

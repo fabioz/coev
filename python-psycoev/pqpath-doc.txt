@@ -1,0 +1,82 @@
+PQPATH FTW.
+and what it does
+
+/* macros to clean the pg result */
+/* used only in pqpath.c and cursor_type.c */
+#define IFCLEARPGRES(pgres)  if (pgres) {PQclear(pgres); pgres = NULL;}
+#define CLEARPGRES(pgres)    PQclear(pgres); pgres = NULL
+
+/* exported functions */
+
+/* used in connection_int.c only: */
+
+/* pqp_connect: NULL=error, PGconn *= success */
+HIDDEN PGconn *pqp_connect(const char *conn, double pg_io_timeout);
+
+/* pq_close: no return value. */
+HIDDEN void pq_close(connectionObject *conn);
+
+
+
+
+/* connection_int.c and pqpath.c  */
+
+/* pq_abort: 0=error 1=success */
+HIDDEN int pq_abort(connectionObject *conn);
+
+/* pq_commit: 0=error 1=success */
+HIDDEN int pq_commit(connectionObject *conn, double pg_io_timeout);
+
+/* NULL=error */
+HIDDEN PGresult *pqp_exec(PGconn *conn, const char *command, double pg_io_timeout);
+
+/* 1=error, raises exception. 0=success */
+HIDDEN int pq_check_result(PGconn *pgconn, PGresult *pgres);
+
+
+
+
+/* cursor_type.c only: */
+/* 
+     -1 - some error occurred while calling libpq
+      0 - no result from the backend but no libpq errors
+      1 - result from backend (possibly data is ready)
+*/
+HIDDEN int pq_fetch(cursorObject *curs);
+
+/* 0=success -1=error */
+HIDDEN int pq_execute(cursorObject *curs, const char *query, int async);
+
+/* 0=EWOULDBLOCK? WTF? 1=there is data -1=an exception has been raised */
+/* seems to be for async queries. we don't need that rly. */
+HIDDEN int pq_is_busy(connectionObject *conn);
+
+
+
+Error handling.
+===============
+
+Return values for functions is 0/NULL= no error, -1/non-NULL=error
+
+Exception is raised as soon as its type can be determined, 
+preferebly in the function that first detects error.
+
+All exported functions from the pqpath.c have the exception set when 
+returning an error-indicating value.
+
+
+errors as returned by coev_wait() are converted to modcoev's exceptions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
