@@ -201,8 +201,10 @@ mod_switch_bottom_half(void) {
         case CSW_SIGCHLD:
             /*  */
             dead_meat = self->origin;
-            if (dead_meat->state != CSTATE_DEAD)
+            if (dead_meat->state != CSTATE_DEAD) {
+                coev_dmflush();
                 Py_FatalError("CSW_SIGCHLD, but dead_meat->state != CSTATE_DEAD");
+            }
             Py_CLEAR(self->A);
             self->A = dead_meat->A;
             self->X = dead_meat->X;
