@@ -381,12 +381,8 @@ _return_a_coev(coev_t *sp) {
             ts_coev_bunch.busy->cb_prev = NULL;
     }
 
-#ifdef I_AM_NOT_PARANOID
     sp->state = CSTATE_ZERO;
     sp->status = CSW_NONE;
-#else
-    memset(sp, 0, sizeof(coev_t));
-#endif
     
     /* 2. add to avail list */
     sp->cb_prev = NULL; /* not used in avail list */
@@ -556,6 +552,8 @@ update_treepos(coev_t *coio) {
     if (!rv)
 	_fm.abort("treepos(): memory allocation failed.");
     memmove(rv, curpos+1, rvlen-1); /* strip leading space */
+    if (coio->treepos)
+        _fm.free(coio->treepos);
     coio->treepos = rv;
 }
 
