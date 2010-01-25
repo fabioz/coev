@@ -837,7 +837,7 @@ class Client(object):
                 connection.mark_dead(msg)
         return retvals
 
-    def get_multi_worker(self, server, skeys):
+    def get_multi_worker(self, server, skeys, p2o_key):
         el = logging.getLogger('evmemc.get_multi_worker')
         el.debug('entered')
         try:
@@ -850,7 +850,7 @@ class Client(object):
                 try:
                     if rkey is not None:
                         val = self._recv_value(connection, flags, rlen)
-                        retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.
+                        retvals[p2o_key[rkey]] = val   # un-prefix returned key.
                 except KeyError:
                     raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
                 line = connection.readline()
@@ -868,7 +868,7 @@ class Client(object):
         server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(keys, key_prefix)
 
         for server, keys in server_keys.items():
-            thread.start_new_thread(self.get_multi_worker, (server, keys))
+            thread.start_new_thread(self.get_multi_worker, (server, keys, prefixed_to_orig_key))
         el.debug('workers spawned')
         # wait for workers to die
         wcount = len(server_keys)
@@ -878,11 +878,11 @@ class Client(object):
             wcount -= 1
             try:
                 wrv = coev.switch2scheduler()
-                el.debug('wrv: %r', wrv)
+                el.debug('wrv: %s', type(wrv))
                 retval.update(wrv)
             except:
                 pass
-        el.debug('returning %r', retval)
+        el.debug('returning %d kvpairs', len(retval))
         return retval
 
     def _expectvalue(self, server, line=None):
