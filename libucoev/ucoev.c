@@ -496,6 +496,7 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->parent = (coev_t*)ts_current;
     ts_current->child_count ++;
     
+    child->treepos = NULL;
     update_treepos(child);
     child->run = runner;
     child->state = CSTATE_RUNNABLE;
