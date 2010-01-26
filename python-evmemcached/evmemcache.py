@@ -839,11 +839,11 @@ class Client(object):
 
     def get_multi_worker(self, server, keys, prefixed_to_orig_key):
         el = logging.getLogger("evmemc.get_multi_worker")
+        retvals = {}
         try:
             connection = server.connect()
             connection.send_cmd("get %s" % " ".join(keys))
             line = connection.readline()
-            retvals = {}
             while line and line != 'END':
                 rkey, flags, rlen = self._expectvalue(connection, line)
                 try:
@@ -853,9 +853,9 @@ class Client(object):
                 except KeyError:
                     raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
                 line = connection.readline()
-            return retvals
         except:
             el.exception("worker: ")
+        return retvals
 
     def get_multi(self, keys, key_prefix=''):
         self._statlog('mget_multi')
