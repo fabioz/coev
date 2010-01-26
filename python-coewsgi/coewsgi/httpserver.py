@@ -1,8 +1,6 @@
-import socket, errno, urlparse, urllib, posixpath, sys
+import socket, errno, urlparse, urllib, posixpath, sys, logging
 import coev, thread
 from BaseHTTPServer import BaseHTTPRequestHandler
-
-import traceback
 
 SocketErrors = (socket.error,)
 
@@ -30,6 +28,7 @@ class CoevWSGIServer(object):
         self.iop_timeout = iop_timeout
         self.wsgi_application = wsgi_application
         self.wsgi_timeout = wsgi_timeout
+        self.el = logging.getLogger('coewsgi.cwserver')
 
     def bind(self):
         self.socket = socket.socket(self.address_family, self.socket_type)
@@ -41,6 +40,7 @@ class CoevWSGIServer(object):
         host, self.server_port = self.server_address[:2]
         self.server_name = socket.getfqdn(host)
         self.socket.listen(self.request_queue_size)
+        self.el.info('listening on %s:%s (%s)', host, self.server_port, self.server_name)
 
     def unbind(self):
         self.socket.close()
@@ -66,6 +66,8 @@ class CoevWSGIServer(object):
                 coev.wait(fd, coev.READ, self.accept_timeout)
             except (coev.WaitAbort, coev.Timeout):
                 pass
+            except:
+                self.el.exception('serve(): unhandled: ')
 
         self.__serving = False
 
@@ -172,7 +174,6 @@ class WSGIHandlerMixin(object):
                 message = ''
         if self.request_version != 'HTTP/0.9':
             self.rq_header += "%s %d %s\r\n" % (self.protocol_version, code, message)
-            # print (self.protocol_version, code, message)
         self.send_header('Server', self.version_string())
         self.send_header('Date', self.date_time_string())
 
@@ -380,7 +381,7 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         self.stats_collector = stats_collector
         if stats_collector:
             stats_collector.incr('coewsgi.c_accepts')
-            
+        self.el = logging.getLogger('coewsgi.cwhandler')
         try:
             self.handle()
         finally:
@@ -415,7 +416,7 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         except Exception, e:
             if self.stats_collector:
                 self.stats_collector.incr('coewsgi.c_unhexcs')
-            sys.stderr.write(traceback.format_exc())
+            self.el.exception('handle_one_request')
 
     def handle(self):
         # don't bother logging disconnects while handling a request
@@ -426,9 +427,13 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
             while not self.close_connection:
                 self.handle_one_request()
         except SocketErrors, exce:
+            self.el.exception('handle: socketerror')
             self.wsgi_connection_drop(exce)
         except coev.SocketError, exce:
+            self.el.exception('handle: coev.SE')
             self.wsgi_connection_drop(exce)
+        except:
+            self.el.exception('handle: unhandled exception')
 
     def address_string(self):
         """Return the client address formatted for logging.
@@ -441,8 +446,8 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
           ssl_context=None, server_version=None, protocol_version=None,
           start_loop=True, daemon_threads=None, socket_timeout=4.2,
           use_threadpool=None, threadpool_workers=10,
-          threadpool_options=None, request_queue_size=10, response_timeout=42.23,
-          server_status=None):
+          threadpool_options=None, request_queue_size=10, response_timeout=4.2,
+          request_timeout=4.2, server_status=None):
           
     """
     Serves your ``application`` over HTTP via WSGI interface
@@ -492,6 +497,18 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
         given client will be kept open.  At this time, it is a rude
         disconnect, but at a later time it might follow the RFC a bit
         more closely.
+
+    ``request_queue_size``
+
+        listen(2) parameter
+
+    ``response_timeout``
+  
+        Maximum time to wait for the response to be completed by the app stack
+     
+    ``request_timeout``
+        
+        iop timeout on request reading operations
         
     ``server_status``
     
@@ -504,6 +521,8 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
     assert not use_threadpool, "threads are evil"
     #assert converters.asbool(start_loop), "WTF?"
     sys.setcheckinterval(10000000)
+
+  
 
     host = host or '127.0.0.1'
     if not port:
@@ -531,24 +550,37 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
 
     protocol = 'http'
     host, port = server.server_address
+
+    el = logging.getLogger('coewsgi.serve')
+
     if host == '0.0.0.0':
-        print 'serving on 0.0.0.0:%s view at %s://127.0.0.1:%s' % \
-            (port, protocol, port)
+        el.info('serving on 0.0.0.0:%s view at %s://127.0.0.1:%s', 
+                 port, protocol, port)
     else:
-        print "serving on %s://%s:%s" % (protocol, host, port)
+        el.info("serving on %s://%s:%s", protocol, host, port)
     
+    el.info('request_queue_size: %d', request_queue_size)
+    el.info('socket_timeout: %0.3f', socket_timeout)
+    el.info('request_timeout: %0.3f', request_timeout)
+    el.info('response_timeout: %0.3f', response_timeout)
+
+
     def rim(server):
         try:
             server.bind()
             server.serve()
         except KeyboardInterrupt:
             # allow CTRL+C to shutdown
+            el.info('exiting on KeyboardInterrupt')
             pass
         finally:
             server.unbind()
 
     thread.start_new_thread(rim, (server,))
-    coev.scheduler()
+    try:
+        coev.scheduler()
+    except:
+        el.exception('exception out of scheduler:')
 
 
 # For paste.deploy server instantiation (egg:coewsgi#http)
@@ -602,6 +634,7 @@ class CoevStatsMiddleware(object):
 if __name__ == '__main__':
     
     sys.setcheckinterval(10000000)
+    logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
     #coev.setdebug(True, coev.CDF_COEV | coev.CDF_COEV_DUMP |coev.CDF_RUNQ_DUMP | coev.CDF_NBUF)
     coev.setdebug(False, 0)
     #coev.setdebug(True, coev.CDF_COEV)
