@@ -1,0 +1,11 @@
+libucoev0 (0.1-2) unstable; urgency=low
+
+  * implicit join re-enabled
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Mon, 25 Jan 2010 18:23:54 +0300
+
+libucoev0 (0.1-1) unstable; urgency=low
+
+  * Initial release
+
+ -- Nikolay Sivko <sivko@hh.ru>  Mon, 23 Nov 2009 15:23:10 +0300
