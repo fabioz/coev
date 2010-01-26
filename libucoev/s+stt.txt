@@ -123,4 +123,43 @@ Operation on a busy (in use by some other coroutine) cnrbuf_t object: result not
 
 
 
+The whole join mess:
+
+question is what happens with return values of coevs that die while their parent is dead or 
+waiting on an event.
+
+If the coev's return value is not wanted, set its parent to scheduler or some other
+coev that would just discard it.
+
+If parent's dead, there is a search (_sweep) to find non-dead parent. But, problem is, 
+the switchback with some coev's return value is likely to not be expected there.
+
+On the other hand, the parent may be ready to accept the return value, but just happen to 
+be waiting for some unrelated event. This is bad programming style, but the situation should
+be handled gracefully nevertheless.
+
+Current:
+    if the parent is dead or waits on an event, and there is a scheduler: 
+	switch to scheduler which discards.
+    if the parent is dead or waits on an event, and there no scheduler:
+	switch to first ancestor in CSTATE_RUNNABLE
+    otherwise, switch to parent with the return value.
+
+
+Proposed:
+    As above, but if a parent waits on an event:
+	set dead child to CSTATE_ZOMBIE
+	add dead child to per-parent zombie queue
+    
+    When parent dies, its zombie queue contents get discarded
+    by ???
+    
+    If parent calls coev_join(), first child from zombie queue 
+    gets switched into and completes its cleanup, switching to
+    parent (which is now CSTATE_RUNNABLE) with its return value.
+    If the zombie queue is empty, something happens.
+    
+    
+
+
   

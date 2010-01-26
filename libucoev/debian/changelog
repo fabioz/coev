@@ -1,3 +1,9 @@
+libucoev0 (0.2-4) unstable; urgency=low
+
+  * fix the abort on elapsed sleep
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 26 Jan 2010 18:42:54 +0300
+
 libucoev0 (0.2-3) unstable; urgency=low
 
   * fixup debian/*.install
