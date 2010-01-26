@@ -28,16 +28,6 @@
 #include "valgrind.h"
 #endif
 
-#ifdef THREADING_MADNESS
-#define TLS_ATTR __thread
-#define CROSSTHREAD_CHECK(target, rv) \
-    if (pthread_equal(ts_current->thread, (target)->thread)) \
-        _fm.abort("crossthread switch prohibited");
-#else
-#define TLS_ATTR
-#define CROSSTHREAD_CHECK(target, rv)
-#endif
-
 static coev_frameth_t _fm;
 static char *dmesg = NULL;
 static char *dm_cp = NULL; /* points at the first 0 byte in the dmesg */
@@ -125,6 +115,30 @@ coev_dmflush(void) {
 
 #define cstk_dump(msg) do { if (_fm.debug & CDF_STACK_DUMP) \
     _dump_stack_bunch(msg); } while(0)
+
+static void
+fm_abort(const char *msg) {
+    coev_dmprintf("%s; aborting.", msg);
+    coev_dmflush();
+    _fm.abort(msg);
+}
+
+static void
+fm_eabort(const char *msg, int err_no) {
+    coev_dmprintf("%s; (errno=%d: %s) aborting.", msg, err_no, strerror(errno));
+    coev_dmflush();
+    _fm.eabort(msg, err_no);
+}
+
+#ifdef THREADING_MADNESS
+#define TLS_ATTR __thread
+#define CROSSTHREAD_CHECK(target, rv) \
+    if (pthread_equal(ts_current->thread, (target)->thread)) \
+        fm_abort("crossthread switch prohibited");
+#else
+#define TLS_ATTR
+#define CROSSTHREAD_CHECK(target, rv)
+#endif
 
 typedef struct _coev_lock_bunch colbunch_t;
 struct _coev_lock_bunch {
@@ -227,7 +241,7 @@ _get_a_stack(size_t size) {
     
         base = mmap(NULL, to_allocate, PROT_EXEC|PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_GROWSDOWN, -1, 0); 
         if (base == MAP_FAILED)
-            _fm.eabort("_get_a_stack(): mmap() stack allocation failed", errno);
+            fm_eabort("_get_a_stack(): mmap() stack allocation failed", errno);
         
         rv = (coevst_t *) ( base + size );
         rv->base = base;
@@ -306,9 +320,9 @@ _free_stacks(void) {
             spbn = spb->next;
 
         if (spa && ( 0 != munmap(spa, spa->size + sizeof(coevst_t))))
-            _fm.eabort("_free_stacks(): munmap failed.", errno);
+            fm_eabort("_free_stacks(): munmap failed.", errno);
         if (spb && ( 0 != munmap(spb, spb->size + sizeof(coevst_t))))
-                _fm.eabort("_free_stacks(): munmap failed.", errno);
+                fm_eabort("_free_stacks(): munmap failed.", errno);
         
 #ifdef HAVE_VALGRIND
         VALGRIND_STACK_DEREGISTER(spa->vg_id);
@@ -340,7 +354,7 @@ _get_a_coev(void) {
     if (!rv) {
         rv = malloc(sizeof(coev_t));
         if (rv == NULL)
-           _fm.abort("_get_a_coev(): malloc() failed");
+           fm_abort("_get_a_coev(): malloc() failed");
         _fm.i.coevs_allocated ++;
     } else {
         /* remove from the avail list if we took it from there */
@@ -426,7 +440,7 @@ static void iotimeout_callback(struct ev_loop *, ev_timer *, int );
 static void
 coev_init_root(coev_t *root) {
     if (ts_current != NULL) 
-        _fm.abort("coev_init_root(): second initialization refused.");
+        fm_abort("coev_init_root(): second initialization refused.");
     
     ts_current = root;
     ts_root = root;
@@ -444,7 +458,6 @@ coev_init_root(coev_t *root) {
     root->lq_next = NULL;
     root->lq_prev = NULL;
     root->child_count = 0;
-    root->being_joined = 0;
     
     update_treepos(root);
     
@@ -471,16 +484,16 @@ coev_new(coev_runner_t runner, size_t stacksize) {
         coev_evinit();
     
     if (ts_current == NULL)
-        _fm.abort("coev_init(): library not initialized");
+        fm_abort("coev_init(): library not initialized");
     
     if (stacksize < SIGSTKSZ)
-        _fm.abort("coev_init(): stack size too small (less than SIGSTKSZ)");
+        fm_abort("coev_init(): stack size too small (less than SIGSTKSZ)");
 
     child = _get_a_coev();
     cstack = _get_a_stack(stacksize);
     
     if (getcontext(&child->ctx))
-	_fm.eabort("coev_init(): getcontext() failed", errno);
+	fm_eabort("coev_init(): getcontext() failed", errno);
     
     child->ctx.uc_stack.ss_sp = cstack->sp;
     /* child->ctx.uc_stack.ss_flags = 0; */
@@ -504,7 +517,6 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->rq_next = NULL;
     child->lq_next = NULL;
     child->lq_prev = NULL;
-    child->being_joined = 0;
 
     {
         cokeychain_t *kc = &child->kc;
@@ -551,7 +563,7 @@ update_treepos(coev_t *coio) {
     }
     rv = _fm.malloc(rvlen);
     if (!rv)
-	_fm.abort("treepos(): memory allocation failed.");
+	fm_abort("treepos(): memory allocation failed.");
     memmove(rv, curpos+1, rvlen-1); /* strip leading space */
     if (coio->treepos)
         _fm.free(coio->treepos);
@@ -678,7 +690,7 @@ coev_switch(coev_t *target) {
         
         case CSTATE_ZERO:
         default:
-            _fm.abort("switch to uninitialized coroutine");
+            fm_abort("switch to uninitialized coroutine");
     }
     
     target->origin = origin;
@@ -691,7 +703,7 @@ coev_switch(coev_t *target) {
     cstk_dump("before switch\n");
     
     if (swapcontext(&origin->ctx, &target->ctx) == -1)
-        _fm.abort("coev_switch(): swapcontext() failed.");
+        fm_abort("coev_switch(): swapcontext() failed.");
     
     cstk_dump("after switch\n");
     _fm.i.c_switches++;
@@ -767,25 +779,18 @@ coev_initialstub(void) {
     /* release resources */
     parent = _coev_sweep(self);
 
-#if EXPLICIT_JOINS    
-    if (ts_scheduler.scheduler && ( !(self->being_joined))) {
-        parent = ts_scheduler.scheduler;
-    } else {
-#else
-    {
-#endif
-        /* find switchable target by ignoring dead and busy coroutines */
-        while (    (parent != NULL)
-                && (parent->state != CSTATE_RUNNABLE) )
-            parent = parent->parent;
 
-        if (!parent) {
-            if (ts_scheduler.scheduler && (ts_scheduler.scheduler->state == CSTATE_RUNNABLE) )
-                /* here if scheduler is in another branch AND root is not RUNNABLE/SCHEDULED. */
-                parent = ts_scheduler.scheduler;
-            else
-                _fm.abort("coev_initialstub(): absolutely no one to cede control to.");
-        }
+    /* find switchable target by ignoring dead and busy coroutines */
+    while (    (parent != NULL)
+            && (parent->state != CSTATE_RUNNABLE) )
+        parent = parent->parent;
+
+    if (!parent) {
+        if (ts_scheduler.scheduler && (ts_scheduler.scheduler->state == CSTATE_RUNNABLE) )
+            /* here if scheduler is in another branch AND root is not RUNNABLE/SCHEDULED. */
+            parent = ts_scheduler.scheduler;
+        else
+            fm_abort("coev_initialstub(): absolutely no one to cede control to.");
     }
     
     parent->state  = CSTATE_CURRENT;
@@ -797,7 +802,7 @@ coev_initialstub(void) {
 
     setcontext(&parent->ctx);
     
-    _fm.abort("coev_initialstub(): setcontext() returned. This cannot be.");
+    fm_abort("coev_initialstub(): setcontext() returned. This cannot be.");
 }
 
 /* ioscheduler functions */
@@ -855,7 +860,7 @@ _runq_dump(const char *header) {
         coev_dprintf("    <%p> [%s] %s %s\n", next, next->treepos,
             str_coev_state[next->state], str_coev_status[next->status] );
         if (next == next->rq_next)
-            _fm.abort("_runq_dump(): runqueue loop detected");
+            fm_abort("_runq_dump(): runqueue loop detected");
         next = next->rq_next;
     }
 }
@@ -876,7 +881,7 @@ coev_schedule(coev_t *waiter) {
         case CSTATE_RUNNABLE:
             break;
         default: 
-            _fm.abort("coev_schedule(): invalid coev_t::state");
+            fm_abort("coev_schedule(): invalid coev_t::state");
     }
     
     waiter->state = CSTATE_SCHEDULED;
@@ -1004,7 +1009,7 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
              ev_is_pending(&self->io_timer) ? 'P' : 'p',
              ev_is_active(&self->sleep_timer) ? 'A' : 'a',
              ev_is_pending(&self->sleep_timer) ? 'P' : 'p' );
-        _fm.abort("coev_wait(): inconsistent event watchers' status.");
+        fm_abort("coev_wait(): inconsistent event watchers' status.");
     }
     
     if ((fd == -1) && (revents == 0)) {
@@ -1034,7 +1039,7 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
     _fm.i.c_ctxswaps++;
     cstk_dump("before swapcontext\n");
     if (swapcontext(&self->ctx, &ts_scheduler.scheduler->ctx) == -1)
-        _fm.abort("coev_scheduled_switch(): swapcontext() failed.");
+        fm_abort("coev_scheduled_switch(): swapcontext() failed.");
     cstk_dump("after swapcontext\n");
     
     /* we're here either because scheduler switched back
@@ -1048,7 +1053,7 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
             self->origin->treepos, str_coev_state[self->origin->state],
             self->treepos, str_coev_state[self->state], 
             str_coev_status[self->status]);
-        _fm.abort("unscheduled switch into event-waiting coroutine");
+        fm_abort("unscheduled switch into event-waiting coroutine");
     }
     coev_dprintf("coev_wait(): [%s] switch back from [%s] %s CSW: %s\n", 
         self->treepos, self->origin->treepos,
@@ -1124,7 +1129,7 @@ coev_loop(void) {
                 ts_current->treepos, target, runq_head, target->rq_next);
 	    runq_head = target->rq_next;
             if (runq_head == target)
-                _fm.abort("coev_loop(): runqueue loop detected");
+                fm_abort("coev_loop(): runqueue loop detected");
 	    target->rq_next = NULL;
             
             if ((target->state != CSTATE_RUNNABLE) && (target->state != CSTATE_SCHEDULED)) {
@@ -1148,7 +1153,7 @@ coev_loop(void) {
             
             _fm.i.c_ctxswaps ++;
             if (swapcontext(&target->origin->ctx, &target->ctx) == -1)
-                _fm.abort("coev_loop(): swapcontext() failed.");
+                fm_abort("coev_loop(): swapcontext() failed.");
             
             cstk_dump("after swapcontext\n");
             cstk_dprintf("current sp %p origin's sp %p\n", ts_current->ctx.uc_stack.ss_sp,
@@ -1169,7 +1174,7 @@ coev_loop(void) {
                     coev_dprintf("Unexpected switch to scheduler (i'm [%s])\n", ts_current->treepos);
                     coev_dump("origin", ts_current->origin); 
                     coev_dump("self", (coev_t *)ts_current);
-                    _fm.abort("unexpected switch to scheduler");
+                    fm_abort("unexpected switch to scheduler");
             }
 	}
         
@@ -1242,13 +1247,13 @@ colock_bunch_init(colbunch_t **bunch_p) {
     if (bunch == NULL) {
 	bunch = _fm.malloc(sizeof(colbunch_t));
 	if (bunch == NULL)
-	    _fm.abort("ENOMEM allocating lockbunch");
+	    fm_abort("ENOMEM allocating lockbunch");
     }
     bunch->next = NULL;
     bunch->area = _fm.malloc(sizeof(colock_t) * COLOCK_PREALLOCATE);
     
     if (bunch->area == NULL)
-	_fm.abort("ENOMEM allocating lock area");	
+	fm_abort("ENOMEM allocating lock area");	
     
     memset(bunch->area, 0, sizeof(colock_t) * COLOCK_PREALLOCATE);
     bunch->allocated =  COLOCK_PREALLOCATE;
@@ -1331,7 +1336,7 @@ colock_free(colock_t *lock) {
 	while (prev->next != lock) {
 	    if (prev->next == NULL) {
                 colo_dump(ts_rootlockbunch);
-		_fm.abort("Whoa, colbunch_t at %p is corrupted!");
+		fm_abort("Whoa, colbunch_t at %p is corrupted!");
             }
 	    prev = prev->next;
 	}
@@ -1365,7 +1370,7 @@ colock_acquire(colock_t *p, int wf) {
         if (p->count == 0) {
             colo_dprintf("colock_acquire(%p, %d): lock has owner [%s] and count=0, unpossible!\n",
                     p, wf, p->owner->treepos);
-            _fm.abort("owned lock has count = 0");
+            fm_abort("owned lock has count = 0");
         }
 	/* the promised dire insults */
 	colo_dprintf("colock_acquire(%p, %d): [%s] attemtps to acquire lock that was not released by [%s]\n",
@@ -1440,7 +1445,7 @@ cls_keychain_init(cokeychain_t **kc) {
     if (*kc == NULL) {
 	*kc = _fm.malloc(sizeof(cokeychain_t));
 	if (*kc == NULL) 
-	    _fm.abort("ENOMEM allocating new keychain");
+	    fm_abort("ENOMEM allocating new keychain");
     }
     memset(*kc, 0, sizeof(cokeychain_t));
 }
@@ -1542,7 +1547,7 @@ cnrbuf_init(cnrbuf_t *self, int fd, double timeout, size_t prealloc, size_t rlim
     self->err_no = 0;
     
     if (!self->in_buffer)
-	_fm.abort("cnrbuf_init(): No memory for me!");
+	fm_abort("cnrbuf_init(): No memory for me!");
     self->in_position = self->in_buffer;
     _fm.i.cnrbufs_allocated ++;
     _fm.i.cnrbufs_used ++;
@@ -1688,7 +1693,7 @@ rerecv:
 		if (ts_current->status == CSW_TIMEOUT)
                     self->err_no = ETIMEDOUT;
                 else
-                    _fm.abort("cnrbuf_read(): unpossible status after wait");
+                    fm_abort("cnrbuf_read(): unpossible status after wait");
             } else {
                 self->err_no = errno;
             }
@@ -1835,7 +1840,7 @@ rerecv:
 		if (ts_current->status == CSW_TIMEOUT)
                     self->err_no = ETIMEDOUT;
                 else
-                    _fm.abort("cnrbuf_readline(): unpossible status after wait");
+                    fm_abort("cnrbuf_readline(): unpossible status after wait");
             } else {
                 self->err_no = errno;
             }
@@ -1878,7 +1883,7 @@ coev_send(int fd, const void *data, ssize_t len, ssize_t *rv, double timeout) {
                     *rv = written;
                     return -1;
                 }
-                _fm.abort("coev_send() unpossible status after wait()");
+                fm_abort("coev_send() unpossible status after wait()");
 	    }
 	    break;
 	}
@@ -1910,7 +1915,7 @@ coev_setparent(coev_t *target, coev_t *newparent) {
     p = _coev_sweep(newparent);
 
     if (!p)
-        _fm.abort("everyone's dead, how come?");
+        fm_abort("everyone's dead, how come?");
     
     target->parent->child_count --;
     
@@ -1922,23 +1927,11 @@ coev_setparent(coev_t *target, coev_t *newparent) {
     return 0;
 }
 
-void
-coev_join(coev_t *target) {
-    coev_setparent(target, (coev_t *)ts_current);
-    target->being_joined = 1;
-    ts_current->state = CSTATE_RUNNABLE;
-    ts_current->status = CSW_VOLUNTARY;    
-    if (ts_scheduler.scheduler)
-        coev_switch(ts_scheduler.scheduler);
-    else
-        coev_switch(target);
-}
-
 void 
 coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     /* multiple calls will result in havoc */
     if (ts_count != 0)
-        _fm.abort("coev_libinit(): second initialization refused.");
+        fm_abort("coev_libinit(): second initialization refused.");
     
     ts_count = 1;
     
@@ -1959,7 +1952,7 @@ coev_libinit(const coev_frameth_t *fm, coev_t *root) {
     
     dmesg = dm_cp = _fm.malloc(_fm.dm_size);
     if (!dmesg)
-        _fm.abort("coev_libinit(): dmesg allocation failed.");
+        fm_abort("coev_libinit(): dmesg allocation failed.");
     memset(dmesg, 0, _fm.dm_size);
     
     coev_init_root(root);
@@ -1992,7 +1985,7 @@ void
 coev_libfini(void) {
     /* should do something good here. */
     if (ts_current != ts_root)
-	_fm.abort("coev_libfini() must be called only in root coro.");
+	fm_abort("coev_libfini() must be called only in root coro.");
     coev_dprintf("coev_libfini(): bye bye");
     if (_ev_initialized)
         ev_default_destroy();
