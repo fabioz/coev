@@ -2,7 +2,7 @@ libucoev0 (0.1-3) unstable; urgency=low
 
   * force dmflush on abort; totally revert to implicit joins only
 
- -- lxnt <lxnt@lxnt-desktop>  Tue, 26 Jan 2010 15:25:21 +0300
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 26 Jan 2010 15:25:21 +0300
 
 libucoev0 (0.1-2) unstable; urgency=low
 
