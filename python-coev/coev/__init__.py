@@ -1,6 +1,5 @@
-import random
-import socket
-import errno
+import random, socket, errno, time, logging
+
 from _coev import *
 from _coev import __version__
 """
@@ -93,6 +92,7 @@ class ConnectionProxy(object):
 
 class ConnectionPool(object):
     def __init__(self, conn_limit, conn_busy_wait, conn_timeout, iop_timeout, read_limit, *endpoints):
+        self.el=logging.getLogger('coev.ConnectionPool')
         self.busy = []
         self.available = []
         self.conn_busy_wait = conn_busy_wait
@@ -128,9 +128,8 @@ class ConnectionPool(object):
         if len(self.available) > 0:
             conn = self.available.pop()
             self.busy.append(conn)
-            if False:
-                print "[{4}] Avail {0} Busy {1} Gets {2} giving {3}".format(
-                    len(self.available), len(self.busy), self.gets, id(conn), getpos())
+            el.debug("get(): [{4}] Avail {0} Busy {1} Gets {2} giving {3}".format(
+                    len(self.available), len(self.busy), self.gets, id(conn), getpos()))
             return ConnectionProxy(conn)
         
         endpoints = list(self.endpoints)
@@ -140,12 +139,11 @@ class ConnectionPool(object):
             try:
                 conn = Connection(self, endpoint, self.conn_timeout, self.iop_timeout, self.read_limit)
             except Timeout:
-                print "Timeout"
+                el.debug('connection timeout')
             except socket.error, e:
-                print repr(e)
-                print len(self.busy)
+                el.debug('socket.error: %s (%d); busy len %d', e.strerror, e.errno, len(self.busy))
             except Exception,e:
-                print repr(e)
+                el.exception('unknown exception: re-raising')
                 raise
             else:
                 break
@@ -162,9 +160,8 @@ class ConnectionPool(object):
         self.busy.remove(conn)
         if conn.dead is not True:
             self.available.append(conn)
-            if False:
-                print "[{4}] Avail {0} Busy {1} Gets {2} returned {3}".format(
-                    len(self.available), len(self.busy), self.gets, id(conn), getpos())
+            el.debug("release():[{4}] Avail {0} Busy {1} Gets {2} returned {3}".format(
+                    len(self.available), len(self.busy), self.gets, id(conn), getpos()))
 
     def drop_idle(self):
         for c in self.available:
