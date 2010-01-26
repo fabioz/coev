@@ -23,7 +23,7 @@ build-stamp: configure-stamp
 clean: 
 	#dh_testdir
 	#dh_testroot
-	rm -f build-stamp configure-stamp
+	rm -rf build-stamp configure-stamp build
 	/opt/python2.6-coev/bin/python ./setup.py clean
 	dh_clean 
 
@@ -59,7 +59,7 @@ binary-arch: install
 #	dh_installinfo
 	dh_installman
 	dh_link
-	dh_strip
+#	dh_strip
 	dh_compress
 	dh_fixperms
 #	dh_perl

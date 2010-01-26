@@ -1,3 +1,9 @@
+python-cqsl (0.1-2) unstable; urgency=low
+
+  * unneeded version bump
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 26 Jan 2010 16:07:45 +0300
+
 python-cqsl (0.1-1) unstable; urgency=low
 
   * Initial release

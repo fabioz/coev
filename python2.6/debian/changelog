@@ -1,3 +1,15 @@
+python2.6-coev (2.6.2-5) unstable; urgency=low
+
+  * bump
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 26 Jan 2010 17:20:50 +0300
+
+python2.6-coev (2.6.2-4) unstable; urgency=low
+
+  * Version bump to force use of libucoev 0.2 
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 26 Jan 2010 16:19:24 +0300
+
 python2.6-coev (2.6.2-3) unstable; urgency=low
 
   * Add python-support.pth

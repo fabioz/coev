@@ -1,10 +1,13 @@
+ABIVERSION=0.2
+
 CFLAGS=-fwrapv -O2 -fno-strict-aliasing -Wstrict-prototypes -g -Wall -fPIC 
 
 #PREFIX?=/usr
 
 #CFLAGS+=-pthread -DTHREADING_MADNESS
 
-SONAME=libucoev.so
+SOBASENAME=libucoev.so
+SONAME=${SOBASENAME}.${ABIVERSION}
 
 all: ${SONAME}
 
@@ -13,13 +16,15 @@ ${SONAME}: ucoev.c ucoev.h
 	gcc -shared -Wl,-soname,${SONAME} -Wl,-R${PREFIX}/lib -o ${SONAME} ucoev.o -lev -lc
 
 clean:
-	rm -f ${SONAME} *.o
+	rm -f ${SOBASENAME}* *.o
 
 pfxinst: clean all
 	install -D ${SONAME} ${PREFIX}/lib/${SONAME}
 	install -D -m 644 ucoev.h ${PREFIX}/include/ucoev.h
+	ln -sf ${SONAME} ${PREFIX}/lib/${SOBASENAME}
 
-install: clean all
+install: all
 	install -D ${SONAME} ${DESTDIR}/usr/lib/${SONAME}
 	install -D ucoev.h ${DESTDIR}/usr/include/ucoev.h
+	ln -sf ${SONAME} ${DESTDIR}/usr/lib/${SOBASENAME}
 

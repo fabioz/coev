@@ -1,3 +1,15 @@
+python-libcoev (0.2-1) unstable; urgency=low
+
+  * version bump to coincide with required libucoev 
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 26 Jan 2010 17:38:31 +0300
+
+python-libcoev (0.1-5) unstable; urgency=low
+
+  * Version bump to force use of libucoev 0.2
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 26 Jan 2010 16:30:05 +0300
+
 python-libcoev (0.1-4) unstable; urgency=low
 
   * remove explicit join function; use logging in ConnectionPool
