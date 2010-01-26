@@ -957,6 +957,8 @@ static void
 sleep_callback(struct ev_loop *loop, ev_timer *w, int revents) {
     coev_t *waiter = (coev_t *) ( ((char *)w) - offsetof(coev_t, sleep_timer) );
 
+    ev_timer_stop(ts_scheduler.loop, w);
+
     assert(waiter->state == CSTATE_SLEEP);
     
     waiter->state = CSTATE_SCHEDULED;
