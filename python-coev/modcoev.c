@@ -177,7 +177,7 @@ coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
     return mod_switch_bottom_half();
 }
 
-/* lower part common to mod_switch(),mod_throw(),mod_join(), mod_stall() */
+/* lower part common to mod_switch(), mod_throw(), mod_stall() */
 static PyObject *
 mod_switch_bottom_half(void) {
     PyObject *result;
@@ -325,34 +325,6 @@ failed_throw:
     Py_DECREF(typ);
     Py_XDECREF(val);
     return NULL;
-}
-
-PyDoc_STRVAR(mod_join_doc,
-"join(thread_id, *args)\n\
-\n\
-Await for execution of given coroutine to cease, pass on any values returned.\n\
-Switches to the scheduler, or to the coro in question in scheduler's absence.\n\
-");
-
-static PyObject* 
-mod_join(PyObject *a, PyObject* args) {
-    long target_id;
-    coev_t *target;
-    
-    if (!PyArg_ParseTuple(args, "l", &target_id))
-	return NULL;
-
-    target = (coev_t *) target_id;
-    
-    coro_dprintf("coro_join: current [%s] target [%s]\n", 
-        coev_treepos(coev_current()),
-        coev_treepos(target));
-    
-    Py_BEGIN_ALLOW_THREADS
-    coev_join(target);
-    Py_END_ALLOW_THREADS
-    
-    return mod_switch_bottom_half();
 }
 
 PyDoc_STRVAR(mod_stall_doc,
@@ -929,7 +901,6 @@ static PyMethodDef CoevMethods[] = {
     {   "current", mod_current, METH_NOARGS, mod_current_doc },
     {   "switch", mod_switch, METH_VARARGS, mod_switch_doc },
     {   "throw", mod_throw, METH_VARARGS, mod_throw_doc },
-    {   "join", mod_join, METH_VARARGS, mod_join_doc },
     {   "wait", mod_wait, METH_VARARGS, mod_wait_doc },
     {   "sleep", mod_sleep, METH_VARARGS, mod_sleep_doc },
     {   "stall", mod_stall, METH_NOARGS, mod_stall_doc },
