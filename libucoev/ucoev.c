@@ -1380,14 +1380,15 @@ colock_acquire(colock_t *p, int wf) {
         if (wf == 0)
             return 0;
         
-        /* put curcoro into the FIFO from one end. */
+        /* put curcoro into the FIFO from the head. */
         ts_current->lq_prev = NULL;
-        if (p->queue_head)
-            p->queue_head->lq_next = p->queue_head;
         ts_current->lq_next = p->queue_head;
+        
+        if (p->queue_head)
+            p->queue_head->lq_prev = (coev_t *)ts_current;
         p->queue_head = (coev_t *)ts_current;
         if (!p->queue_tail)
-            p->queue_tail = (coev_t *)ts_current;
+            p->queue_tail = p->queue_head;
         
         /* switch somewhere */
         ts_current->state = CSTATE_LOCKWAIT;
@@ -1419,6 +1420,7 @@ colock_release(colock_t *p) {
     if (p->count == 0)
         p->owner = NULL;
     
+    /* take a waiting coro from tail, if any */
     if (p->queue_tail) {
         coev_t *lucky = p->queue_tail;
         p->queue_tail = p->queue_tail->lq_prev;
