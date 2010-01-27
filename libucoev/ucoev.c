@@ -1375,7 +1375,7 @@ colock_acquire(colock_t *p, int wf) {
             fm_abort("owned lock has count = 0");
         }
 	/* the promised dire insults */
-	colo_dprintf("colock_acquire(%p, %d): [%s] attemtps to acquire lock that was not released by [%s]\n",
+	colo_dprintf("colock_acquire(%p, %d): [%s] attempts to acquire lock that was not released by [%s]\n",
 	    p, wf, ts_current->treepos, p->owner->treepos);
         if (wf == 0)
             return 0;
