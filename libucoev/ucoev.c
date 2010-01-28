@@ -22,6 +22,8 @@
 #include <ucontext.h>
 #include <errno.h>
 
+#include <signal.h>
+
 #include "ucoev.h"
 
 #ifdef HAVE_VALGRIND
@@ -107,8 +109,11 @@ coev_dmflush(void) {
 #define colo_dprintf(fmt, args...) do { if (_fm.debug & CDF_COLOCK) \
     coev_dmprintf(fmt, ## args); } while(0)
 
-#define colo_dump(lb) do { if (_fm.debug & CDF_COLOCK_DUMP) \
-    _colock_dump(lb); } while(0)
+#define colock_dump(msg, lk) do { if (_fm.debug & CDF_COLOCK_DUMP) \
+    _colock_dump(msg, lk); } while(0)
+
+#define colbunch_dump(lb) do { if (_fm.debug & CDF_COLB_DUMP) \
+    _colbunch_dump(lb); } while(0)
 
 #define cstk_dprintf(fmt, args...) do { if (_fm.debug & CDF_STACK) \
     coev_dmprintf(fmt, ## args); } while(0)
@@ -155,7 +160,6 @@ struct _coev_lock {
     coev_t *queue_head;
     coev_t *queue_tail;
     colbunch_t *bunch;
-    int count;
 };
 
 static TLS_ATTR volatile coev_t *ts_current;
@@ -1207,7 +1211,7 @@ coev_unloop(void) {
 }
 
 static void 
-_colock_dump(colbunch_t *subject) {
+_colbunch_dump(colbunch_t *subject) {
     colbunch_t *c = subject, *p;
     colock_t *lc;
     int i;
@@ -1220,9 +1224,9 @@ _colock_dump(colbunch_t *subject) {
         lc = p->used;
         i = 0;
         while (lc != NULL) {
-            colo_dprintf("            <%p>: owner [%s] count %d bunch %p\n", lc, 
+            colo_dprintf("            <%p>: owner [%s] bunch %p\n", lc, 
                 lc->owner != NULL ? lc->owner->treepos : "(nil)", 
-                lc->count, lc->bunch);
+                lc->bunch);
             lc = lc->next;
             i++;
         }
@@ -1231,14 +1235,32 @@ _colock_dump(colbunch_t *subject) {
         lc = p->avail;
         i = 0;
         while (lc != NULL) {
-            colo_dprintf("            <%p>: owner [%s] count %d bunch %p\n", lc, 
+            colo_dprintf("            <%p>: owner [%s] bunch %p\n", lc, 
                 lc->owner != NULL ? lc->owner->treepos : "(nil)", 
-                lc->count, lc->bunch);
+                lc->bunch);
             lc = lc->next;
             i++;
         }
         colo_dprintf("            TOTAL %d\n", i);
     }    
+}
+
+static void
+_colock_dump(const char *msg, colock_t *subject) {
+    colo_dprintf("%s lock at <%p> current=[%s] owner=[%s] head=%p tail=%p\n",
+        msg,
+        subject,
+        ts_current->treepos,
+        subject->owner == NULL ? "none" : subject->owner->treepos,
+        subject->queue_head, 
+        subject->queue_tail );
+    {
+        coev_t *p = subject->queue_head;
+        while (p) {
+            colo_dprintf("      [%s]\n", p->treepos);
+            p = p->lq_next;
+        }
+    }
 }
 
 /* iff *bunch is NULL, we allocate the struct itself */
@@ -1273,7 +1295,7 @@ colock_bunch_init(colbunch_t **bunch_p) {
     
     *bunch_p = bunch;
     colo_dprintf("colock_bunch_init(%p): allocated at %p.\n", bunch_p, bunch);
-    colo_dump(ts_rootlockbunch);
+    colbunch_dump(ts_rootlockbunch);
 
 }
 
@@ -1317,7 +1339,7 @@ colock_allocate(void) {
     lock->queue_tail = NULL;
 
     colo_dprintf("colock_allocate(): [%s] allocates %p\n", ts_current->treepos, lock);
-    colo_dump(ts_rootlockbunch);
+    colbunch_dump(ts_rootlockbunch);
     return (void *) lock;
 }
 
@@ -1337,7 +1359,7 @@ colock_free(colock_t *lock) {
 	/* find previous lock in the used list */
 	while (prev->next != lock) {
 	    if (prev->next == NULL) {
-                colo_dump(ts_rootlockbunch);
+                colbunch_dump(ts_rootlockbunch);
 		fm_abort("Whoa, colbunch_t at %p is corrupted!");
             }
 	    prev = prev->next;
@@ -1349,37 +1371,25 @@ colock_free(colock_t *lock) {
     /* put it at the top of free list */
     lock->next = bunch->avail;
     bunch->avail = lock;
-    colo_dump(ts_rootlockbunch);
+    colbunch_dump(ts_rootlockbunch);
 }
 
 int
 colock_acquire(colock_t *p, int wf) {
-    if (wf == 0) {
-        if (p->count > 0) {
-            colo_dprintf("colock_acquire(%p, %d): [%s] fails to acquire lock belongs to [%s] %d times\n", 
-                p, wf, ts_current->treepos, p->owner->treepos, p->count);
-            return 0;
-        }
-    }
+    colock_dump("colock_acquire():", p);
     
-    while (p->owner) {
-        if (p->owner == ts_current) {
-            p->count ++;
-            colo_dprintf("colock_acquire(%p, %d): [%s] acquires lock for %dth time\n", 
-                p, wf, ts_current->treepos, p->count);
-            return 1;
-        }
-        if (p->count == 0) {
-            colo_dprintf("colock_acquire(%p, %d): lock has owner [%s] and count=0, unpossible!\n",
-                    p, wf, p->owner->treepos);
-            fm_abort("owned lock has count = 0");
-        }
-	/* the promised dire insults */
-	colo_dprintf("colock_acquire(%p, %d): [%s] attempts to acquire lock that was not released by [%s]\n",
-	    p, wf, ts_current->treepos, p->owner->treepos);
+    if (p->owner != NULL) {
+        colo_dprintf("colock_acquire(%p, %d): [%s]: fail; lock owner [%s]\n", 
+            p, wf, ts_current->treepos, p->owner->treepos);
+        
+        /*
+        if (p->owner == ts_current)
+            return 42;
+        */
+        
         if (wf == 0)
             return 0;
-        
+
         /* put curcoro into the FIFO from the head. */
         ts_current->lq_prev = NULL;
         ts_current->lq_next = p->queue_head;
@@ -1393,13 +1403,17 @@ colock_acquire(colock_t *p, int wf) {
         /* switch somewhere */
         ts_current->state = CSTATE_LOCKWAIT;
         ts_current->status = CSW_VOLUNTARY;
-	if (ts_scheduler.scheduler)
+        if (ts_scheduler.scheduler)
             coev_switch(ts_scheduler.scheduler);
         else
             coev_switch(p->owner);
-    }
-    p->owner = (coev_t *)ts_current;
-    p->count = 1;
+
+        colo_dprintf("colock_acquire(%p, %d): [%s] (waiter); switchback from [%s]; p->owner [%s]\n",
+            p, wf, ts_current->treepos, ts_current->origin->treepos, 
+            p->owner ? p->owner->treepos : "(nil)");
+    } else
+        p->owner = (coev_t *)ts_current;
+    
     colo_dprintf("colock_acquire(%p, %d): [%s] successfully acquires lock.\n", p, wf, ts_current->treepos);
     
     return 1;
@@ -1407,27 +1421,37 @@ colock_acquire(colock_t *p, int wf) {
 
 void 
 colock_release(colock_t *p) {
-    if (p->count == 0)
+    colock_dump("colock_release():", p);
+    if (p->owner == NULL) {
         colo_dprintf("colock_release(%p): [%s] releases a lock that has no owner\n", p, ts_current->treepos);
-    if (p->count > 0)
-        p->count--;
-    if (p->owner != ts_current)
-        colo_dprintf("colock_release(%p): [%s] releases lock that was acquired by [%s], new count=%d\n", 
-            p, ts_current->treepos, p->owner != NULL ? p->owner->treepos : "(nil)", p->count);
-    else
-        colo_dprintf("colock_release(%p): [%s] releases lock, new count=%d.\n", 
-            p, ts_current->treepos, p->count);
-    if (p->count == 0)
-        p->owner = NULL;
+        return;
+    }
+    
+    colo_dprintf("colock_release(%p): [%s] releases lock that was acquired by [%s]; next owner [%s]\n", 
+        p, ts_current->treepos, 
+        p->owner != NULL ? p->owner->treepos : "(nil)", 
+        p->queue_tail != NULL ? p->queue_tail->treepos : "(nil)");
+    
+    p->owner = p->queue_tail;
     
     /* take a waiting coro from tail, if any */
     if (p->queue_tail) {
         coev_t *lucky = p->queue_tail;
         p->queue_tail = p->queue_tail->lq_prev;
+        if (p->queue_tail)
+            p->queue_tail->lq_next = NULL;
         if (lucky == p->queue_head)
             p->queue_head = NULL;
+        colock_dump("colock_release(): lock after release", p);
         coev_schedule(lucky);
     }
+}
+
+int
+colock_is_locked(colock_t *p) {
+    if (p->owner != NULL)
+        return 1;
+    return 0;
 }
 
 /*  Coroutine-local storage is designed to satisfy perverse semantics 

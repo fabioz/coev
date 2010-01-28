@@ -1,3 +1,9 @@
+libucoev0 (0.2-5) unstable; urgency=low
+
+  * fix lock waiters not being woken up
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Wed, 27 Jan 2010 17:25:18 +0300
+
 libucoev0 (0.2-4) unstable; urgency=low
 
   * fix the abort on elapsed sleep

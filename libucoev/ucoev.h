@@ -303,7 +303,7 @@ colock_t *colock_allocate(void);
 void  colock_free(colock_t *p);
 int   colock_acquire(colock_t *p, int wf);
 void  colock_release(colock_t *p); 
-
+int   colock_is_locked(colock_t *p);
 
 /*  Coroutine-local storage is designed to satisfy perverse semantics 
     that Python/thread.c expects. Go figure.
@@ -378,6 +378,7 @@ void coev_getstats(coev_instrumentation_t *i);
 #define CDF_COLOCK_DUMP  0x080   /* lock dumps */
 #define CDF_STACK        0x100   /* stack debug */
 #define CDF_STACK_DUMP   0x200   /* stack bunch dumps */
+#define CDF_COLB_DUMP    0x400   /* lock storage dumps */
 
 void coev_setdebug(int flagsmask);
 void coev_dmprintf(const char *, ...);
