@@ -580,6 +580,24 @@ class Client(object):
 
         return (server_keys, prefixed_to_orig_key)
 
+    def set_multi_worker(self, server, keys, prefixed_to_orig_key, mapping, min_compress_len):
+        el = logging.getLogger("evmemc.set_multi_worker")
+        retval = []
+        connection = server.connect()
+        
+        cmds = []
+        for key in keys: # These are mangled keys
+            store_info = self._val_to_store_info(mapping[prefixed_to_orig_key[key]], min_compress_len)
+            cmds.append("set %s %d %d %d\r\n%s\r\n" % (key, store_info[0], time, store_info[1], store_info[2]))
+        
+        connection.send_cmds(cmds)
+        
+        for key in keys:
+            line = connection.readline()
+            if line != 'STORED':
+                retval.append([prefixed_to_orig_key[rkey]])
+        return retval
+
     def set_multi(self, mapping, time=0, key_prefix='', min_compress_len=0):
         '''
         Sets multiple keys in the memcache doing just one query.
@@ -620,6 +638,33 @@ class Client(object):
         @rtype: list
 
         '''
+        
+        self._statlog('mset_multi')
+        el = logging.getLogger('evmemc.set_multi')
+        el.debug('entered')
+        
+        server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(mapping.iterkeys(), key_prefix)
+
+        for server, keys in server_keys.items():
+            thread.start_new_thread(self.get_multi_worker, (server, keys, prefixed_to_orig_key, mapping))
+    
+        el.debug('workers spawned')
+        # wait for workers to die
+        wcount = len(server_keys)
+        retval = []
+        el.info('[%s] initial wcount=%d', coev.getpos(), wcount)
+        while wcount > 0:
+            el.info('[%s] wcount=%d', coev.getpos(), wcount)
+            wcount -= 1
+            try:
+                retval += coev.switch2scheduler()
+            except Exception, e:
+                el.error('worker failed: %s', e)
+        el.debug('returning %d keys', len(retval))
+        el.info('[%s] workers collected; returning', coev.getpos())
+        return retval
+
+    def old_set_multi(self, mapping, time=0, key_prefix='', min_compress_len=0):
 
         self._statlog('set_multi')
         el = logging.getLogger('evmemc.set_multi')
@@ -840,21 +885,18 @@ class Client(object):
     def get_multi_worker(self, server, keys, prefixed_to_orig_key):
         el = logging.getLogger("evmemc.get_multi_worker")
         retvals = {}
-        try:
-            connection = server.connect()
-            connection.send_cmd("get %s" % " ".join(keys))
+        connection = server.connect()
+        connection.send_cmd("get %s" % " ".join(keys))
+        line = connection.readline()
+        while line and line != 'END':
+            rkey, flags, rlen = self._expectvalue(connection, line)
+            try:
+               if rkey is not None:
+                    val = self._recv_value(connection, flags, rlen)
+                    retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.             
+            except KeyError:
+                raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
             line = connection.readline()
-            while line and line != 'END':
-                rkey, flags, rlen = self._expectvalue(connection, line)
-                try:
-                    if rkey is not None:
-                        val = self._recv_value(connection, flags, rlen)
-                        retvals[prefixed_to_orig_key[rkey]] = val   # un-prefix returned key.
-                except KeyError:
-                    raise KeyError("'%s' using conn %d in [%s]" % (rkey, id(connection.sfile.conn), coev.getpos()))
-                line = connection.readline()
-        except:
-            el.exception("worker: ")
         return retvals
 
     def get_multi(self, keys, key_prefix=''):
@@ -871,14 +913,16 @@ class Client(object):
         # wait for workers to die
         wcount = len(server_keys)
         retval = {}
+        el.info('[%s] initial wcount=%d', coev.getpos(), wcount)
         while wcount > 0:
-            el.debug('wcount=%d', wcount)
+            el.info('[%s] wcount=%d', coev.getpos(), wcount)
             wcount -= 1
             try:
                 retval.update(coev.switch2scheduler())
-            except:
-                el.exception("from worker:")
+            except Exception, e:
+                el.error('worker failed: %s', e)
         el.debug('returning %d kvpairs', len(retval))
+        el.info('[%s] workers collected; returning', coev.getpos())
         return retval
 
     def _expectvalue(self, server, line=None):
