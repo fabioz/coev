@@ -33,6 +33,7 @@ class Connection(object):
     """ those are stored in the connection pool """
     def __init__(self, pool, endpoint, conn_timeout, iop_timeout, read_limit):
         self.pool = pool
+        
         s = socket.socket(endpoint[0], endpoint[1])
         s.setblocking(0)
         while True:
@@ -93,6 +94,7 @@ class ConnectionProxy(object):
 class ConnectionPool(object):
     def __init__(self, conn_limit, conn_busy_wait, conn_timeout, iop_timeout, read_limit, *endpoints):
         self.el=logging.getLogger('coev.ConnectionPool')
+        self.elstat=logging.getLogger('coev.ConnectionPool.stat')
         self.busy = []
         self.available = []
         self.conn_busy_wait = conn_busy_wait
@@ -122,45 +124,50 @@ class ConnectionPool(object):
             wait_start_time = time.time()
             while len(self.busy) == self.conn_limit:
                 if time.time() - wait_start_time > self.conn_busy_wait:
-                    raise TooManyConnections("waited for {0} seconds".format(time.time() - wait_start_time))
+                    raise TooManyConnections("to {0}; waited for {1} seconds".format(
+                                  self.endpoints, time.time() - wait_start_time))
                 sleep(self.conn_timeout)
         
         if len(self.available) > 0:
             conn = self.available.pop()
             self.busy.append(conn)
-            el.debug("get(): [{4}] Avail {0} Busy {1} Gets {2} giving {3}".format(
+            self.elstat.debug("get(): [{4}] Avail {0} Busy {1} Gets {2} giving {3}".format(
                     len(self.available), len(self.busy), self.gets, id(conn), getpos()))
             return ConnectionProxy(conn)
         
         endpoints = list(self.endpoints)
         endpoints.sort(cmp = lambda a,b: random.randint(-1,1))
         conn = None
+        failstr = ''
+        faillist = []
+        #self.el.debug('%r', endpoints) 
         for endpoint in endpoints:
             try:
+                failstr = None
                 conn = Connection(self, endpoint, self.conn_timeout, self.iop_timeout, self.read_limit)
             except Timeout:
-                el.debug('connection timeout')
+                failstr = '{0}: timeout'.format(endpoint)
             except socket.error, e:
-                el.debug('socket.error: %s (%d); busy len %d', e.strerror, e.errno, len(self.busy))
-            except Exception,e:
-                el.exception('unknown exception: re-raising')
-                raise
+                failstr = '{0}: socket.error: {1} ({2})'.format(endpoint, e.strerror, e.errno)
             else:
+                self.el.info('new connection to %s', endpoint)
                 break
+            if failstr:
+                self.el.error(failstr)
+                faillist.append(failstr)
         if not conn:
-            raise NoEndpointsConnectable
+            raise NoEndpointsConnectable(';'.join(faillist))
             
         self.busy.append(conn)
-        if False:
-            print "[{4}] Avail {0} Busy {1} Gets {2} giving new {3}".format(
-                len(self.available), len(self.busy), self.gets, id(conn), getpos())
+        self.elstat.debug("[{4}] Avail {0} Busy {1} Gets {2} giving new {3}".format(
+                len(self.available), len(self.busy), self.gets, id(conn), getpos()))
         return ConnectionProxy(conn)
         
     def release(self, conn):
         self.busy.remove(conn)
         if conn.dead is not True:
             self.available.append(conn)
-            el.debug("release():[{4}] Avail {0} Busy {1} Gets {2} returned {3}".format(
+            self.elstat.debug("release():[{4}] Avail {0} Busy {1} Gets {2} returned {3}".format(
                     len(self.available), len(self.busy), self.gets, id(conn), getpos()))
 
     def drop_idle(self):
