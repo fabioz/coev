@@ -52,6 +52,7 @@ static struct _const_def {
     { "CDF_NBUF_DUMP", CDF_NBUF_DUMP},
     { "CDF_COLOCK", CDF_COLOCK},
     { "CDF_COLOCK_DUMP", CDF_COLOCK_DUMP },
+    { "CDF_COLB_DUMP", CDF_COLB_DUMP },
     { "CDF_STACK", CDF_STACK},
     { "CDF_STACK_DUMP", CDF_STACK_DUMP },
     { 0 }
@@ -871,7 +872,12 @@ mod_stats(PyObject *a, PyObject *b) {
     if (_add_K_to_dict(dick, "coevs_allocated", i.coevs_allocated)) return NULL;
     if (_add_K_to_dict(dick, "coevs_used", i.coevs_used)) return NULL;
     if (_add_K_to_dict(dick, "waiters", i.waiters)) return NULL;
-    if (_add_K_to_dict(dick, "slackers", i.slackers)) return NULL;
+    if (_add_K_to_dict(dick, "slackers", i.slackers)) return NULL;  
+    if (_add_K_to_dict(dick, "colocks_allocated", i.colocks_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "colocks_used", i.colocks_used)) return NULL;
+    if (_add_K_to_dict(dick, "cl_acquires", i.cl_acquires)) return NULL;
+    if (_add_K_to_dict(dick, "cl_acfails", i.cl_acfails)) return NULL;
+    if (_add_K_to_dict(dick, "cl_releases", i.cl_releases)) return NULL;
 
     return dick;
 }
