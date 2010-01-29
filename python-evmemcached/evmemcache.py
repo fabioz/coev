@@ -580,7 +580,7 @@ class Client(object):
 
         return (server_keys, prefixed_to_orig_key)
 
-    def set_multi_worker(self, server, keys, prefixed_to_orig_key, mapping, min_compress_len):
+    def set_multi_worker(self, server, keys, prefixed_to_orig_key, mapping, ttl, min_compress_len):
         el = logging.getLogger("evmemc.set_multi_worker")
         retval = []
         connection = server.connect()
@@ -588,9 +588,9 @@ class Client(object):
         cmds = []
         for key in keys: # These are mangled keys
             store_info = self._val_to_store_info(mapping[prefixed_to_orig_key[key]], min_compress_len)
-            cmds.append("set %s %d %d %d\r\n%s\r\n" % (key, store_info[0], time, store_info[1], store_info[2]))
+            cmds.append("set %s %d %d %d\r\n%s\r\n" % (key, store_info[0], ttl, store_info[1], store_info[2]))
         
-        connection.send_cmds(cmds)
+        connection.send_cmds(''.join(cmds))
         
         for key in keys:
             line = connection.readline()
@@ -598,7 +598,7 @@ class Client(object):
                 retval.append([prefixed_to_orig_key[rkey]])
         return retval
 
-    def set_multi(self, mapping, time=0, key_prefix='', min_compress_len=0):
+    def set_multi(self, mapping, ttl=0, key_prefix='', min_compress_len=0):
         '''
         Sets multiple keys in the memcache doing just one query.
 
@@ -613,7 +613,7 @@ class Client(object):
         the next one.
 
         @param mapping: A dict of key/value pairs to set.
-        @param time: Tells memcached the time which this value should expire, either
+        @param ttl: Tells memcached the time which this value should expire, either
         as a delta number of seconds, or an absolute unix time-since-the-epoch
         value. See the memcached protocol docs section "Storage Commands"
         for more info on <exptime>. We default to 0 == cache forever.
@@ -646,7 +646,7 @@ class Client(object):
         server_keys, prefixed_to_orig_key = self._map_and_prefix_keys(mapping.iterkeys(), key_prefix)
 
         for server, keys in server_keys.items():
-            thread.start_new_thread(self.get_multi_worker, (server, keys, prefixed_to_orig_key, mapping))
+            thread.start_new_thread(self.set_multi_worker, (server, keys, prefixed_to_orig_key, mapping, ttl, min_compress_len))
     
         el.debug('workers spawned')
         # wait for workers to die
@@ -659,7 +659,7 @@ class Client(object):
             try:
                 retval += coev.switch2scheduler()
             except Exception, e:
-                el.error('worker failed: %s', e)
+                el.exception('worker failed: %s', e)
         el.debug('returning %d keys', len(retval))
         el.info('[%s] workers collected; returning', coev.getpos())
         return retval
