@@ -1340,6 +1340,7 @@ colock_allocate(void) {
 
     colo_dprintf("colock_allocate(): [%s] allocates %p\n", ts_current->treepos, lock);
     colbunch_dump(ts_rootlockbunch);
+    _fm.i.colocks_allocated ++;
     return (void *) lock;
 }
 
@@ -1372,11 +1373,13 @@ colock_free(colock_t *lock) {
     lock->next = bunch->avail;
     bunch->avail = lock;
     colbunch_dump(ts_rootlockbunch);
+    _fm.i.colocks_allocated --;
 }
 
 int
 colock_acquire(colock_t *p, int wf) {
     colock_dump("colock_acquire():", p);
+    _fm.i.cl_acquires ++;
     
     if (p->owner != NULL) {
         colo_dprintf("colock_acquire(%p, %d): [%s]: fail; lock owner [%s]\n", 
@@ -1387,8 +1390,10 @@ colock_acquire(colock_t *p, int wf) {
             return 42;
         */
         
-        if (wf == 0)
+        if (wf == 0) {
+            _fm.i.cl_acfails ++;
             return 0;
+        }
 
         /* put curcoro into the FIFO from the head. */
         ts_current->lq_prev = NULL;
@@ -1426,6 +1431,7 @@ colock_release(colock_t *p) {
         colo_dprintf("colock_release(%p): [%s] releases a lock that has no owner\n", p, ts_current->treepos);
         return;
     }
+    _fm.i.cl_releases ++;
     
     colo_dprintf("colock_release(%p): [%s] releases lock that was acquired by [%s]; next owner [%s]\n", 
         p, ts_current->treepos, 

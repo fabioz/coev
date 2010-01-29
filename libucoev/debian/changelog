@@ -1,3 +1,9 @@
+libucoev0 (0.3) unstable; urgency=low
+
+  * colock instrumentation.
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Fri, 29 Jan 2010 16:39:17 +0300
+
 libucoev0 (0.2-5) unstable; urgency=low
 
   * fix lock waiters not being woken up

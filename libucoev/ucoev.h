@@ -184,6 +184,10 @@ typedef struct _coev_instrumentation {
     volatile uint64_t c_runqruns;
     volatile uint64_t c_news;
     
+    volatile uint64_t cl_acquires;
+    volatile uint64_t cl_acfails;
+    volatile uint64_t cl_releases;
+    
     /* gauges */
     volatile uint64_t stacks_allocated;
     volatile uint64_t stacks_used;
@@ -191,6 +195,9 @@ typedef struct _coev_instrumentation {
     volatile uint64_t cnrbufs_used;
     volatile uint64_t coevs_allocated;
     volatile uint64_t coevs_used;
+    volatile uint64_t colocks_allocated;
+    volatile uint64_t colocks_used;
+    
     
     volatile uint64_t waiters;
     volatile uint64_t slackers;
