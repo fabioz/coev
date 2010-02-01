@@ -450,11 +450,8 @@ t_bootstrap(void *boot_raw)
                         subject->S = traceback;
                 }
         }
-        else {
-                coev_t *subject;
-                subject = coev_current();
+        else
                 subject->A = res;
-        }
         }
 #else
 	if (res == NULL) {

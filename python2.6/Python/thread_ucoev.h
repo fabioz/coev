@@ -111,10 +111,8 @@ _wrapper(coev_t *c) {
     void *arg;
     func = ( func_t ) (c->X);
     arg = c->Y;
-    c->A = NULL;
     c->X = NULL;
     c->Y = NULL;
-    c->S = NULL;
     func(arg);
 }
 
@@ -126,10 +124,14 @@ PyThread_start_new_thread(func_t func, void *arg) {
         PyThread_init_thread();
         
     c = coev_new( _wrapper, _stacksize );
-    c->A = NULL;
+    
+    Py_CLEAR(c->A);
+    Py_CLEAR(c->X);
+    Py_CLEAR(c->Y);
+    Py_CLEAR(c->S);
+
     c->X = func;
     c->Y = arg;
-    c->S = NULL;
     coev_schedule(c);
     return (long) c;
 }
