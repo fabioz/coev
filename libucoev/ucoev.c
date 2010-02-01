@@ -488,16 +488,19 @@ coev_new(coev_runner_t runner, size_t stacksize) {
         coev_evinit();
     
     if (ts_current == NULL)
-        fm_abort("coev_init(): library not initialized");
+        fm_abort("coev_new(): library not initialized");
     
     if (stacksize < SIGSTKSZ)
-        fm_abort("coev_init(): stack size too small (less than SIGSTKSZ)");
+        fm_abort("coev_new(): stack size too small (less than SIGSTKSZ)");
 
     child = _get_a_coev();
     cstack = _get_a_stack(stacksize);
     
+    coev_dprintf("coev_new(): got %p: A=%p X=%p Y=%p S=%p\n", 
+        child, child->A, child->X, child->Y, child->S);
+    
     if (getcontext(&child->ctx))
-	fm_eabort("coev_init(): getcontext() failed", errno);
+	fm_eabort("coev_new(): getcontext() failed", errno);
     
     child->ctx.uc_stack.ss_sp = cstack->sp;
     /* child->ctx.uc_stack.ss_flags = 0; */
@@ -1296,6 +1299,8 @@ colock_bunch_init(colbunch_t **bunch_p) {
     *bunch_p = bunch;
     colo_dprintf("colock_bunch_init(%p): allocated at %p.\n", bunch_p, bunch);
     colbunch_dump(ts_rootlockbunch);
+    
+    _fm.i.colocks_allocated += COLOCK_PREALLOCATE;
 
 }
 
@@ -1340,7 +1345,7 @@ colock_allocate(void) {
 
     colo_dprintf("colock_allocate(): [%s] allocates %p\n", ts_current->treepos, lock);
     colbunch_dump(ts_rootlockbunch);
-    _fm.i.colocks_allocated ++;
+    _fm.i.colocks_used ++;
     return (void *) lock;
 }
 
@@ -1373,7 +1378,7 @@ colock_free(colock_t *lock) {
     lock->next = bunch->avail;
     bunch->avail = lock;
     colbunch_dump(ts_rootlockbunch);
-    _fm.i.colocks_allocated --;
+    _fm.i.colocks_used --;
 }
 
 int
