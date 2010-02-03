@@ -1,3 +1,9 @@
+python-libcoev (0.3-2) unstable; urgency=low
+
+  * fixed crashes related to poor reference handling 
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Wed, 03 Feb 2010 17:32:51 +0300
+
 python-libcoev (0.3-1) unstable; urgency=low
 
   * update to match libucoev 0.3

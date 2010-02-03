@@ -153,18 +153,24 @@ exception is raised.");
 
 static PyObject* 
 mod_switch(PyObject *a, PyObject* args) {
-    PyObject *arg = Py_None;
+    PyObject *arg = NULL;
     long target_id;
     coev_t *target;
     
     if (!PyArg_ParseTuple(args, "l|O", &target_id, &arg))
 	return NULL;
-coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
+    
+    coro_dprintf("coev.switch(): target_id %ld object %p\n", target_id, arg);
+    
     target = (coev_t *) target_id;
     
     /* Release old arg, put new one in place. */
-    Py_CLEAR(target->A);
-    Py_INCREF(arg);
+    Py_XDECREF(target->A);
+    
+    if (arg == NULL) {
+        arg = Py_None;
+        Py_INCREF(arg);
+    }
     target->A = arg;
 
     coro_dprintf("coro_switch: current [%s] target [%s] arg %p \n", 
@@ -200,34 +206,40 @@ mod_switch_bottom_half(void) {
     
     switch (self->status) {
         case CSW_SIGCHLD:
-            /*  */
+            /* uncaught exception */
             dead_meat = self->origin;
             if (dead_meat->state != CSTATE_DEAD) {
                 coev_dmflush();
                 Py_FatalError("CSW_SIGCHLD, but dead_meat->state != CSTATE_DEAD");
             }
-            Py_CLEAR(self->A);
-            self->A = dead_meat->A;
-            self->X = dead_meat->X;
-            self->Y = dead_meat->Y;
-            self->S = dead_meat->S;
+            
+            /* drop anything previuosly referenced */
+            Py_XDECREF(self->A);
+            Py_XDECREF(self->X);
+            Py_XDECREF(self->Y);
+            Py_XDECREF(self->S);
+            
+            /* steal references */
+            self->A = dead_meat->A; dead_meat->A = NULL;
+            self->X = dead_meat->X; dead_meat->X = NULL;
+            self->Y = dead_meat->Y; dead_meat->Y = NULL;
+            self->S = dead_meat->S; dead_meat->S = NULL;
             
         case CSW_VOLUNTARY:
             if (self->A != NULL) {
                 /* regular switch or normal return */
-                result = self->A;
-                self->A = NULL; /* steal reference */
+                result = self->A; self->A = NULL; /* steal reference */
                 return result;
             } else {
-                /* exception injection or uncaught exception */
+                /* exception injection */
                 if (self->X == NULL) {
                     /* exit was forced.*/
                     PyObject *thread_id;
-                    if (dead_meat == NULL)
+                    if (self->origin == NULL)
                         Py_FatalError("death by SystemExit, but origin not set.\n");
                     
                     /* thread-id convention is used here. */
-                    thread_id = PyInt_FromLong((long)dead_meat);
+                    thread_id = PyInt_FromLong((long)self->origin);
                     PyErr_SetObject(PyExc_CoroExit, thread_id);
                     Py_DECREF(thread_id);
                     return NULL;
