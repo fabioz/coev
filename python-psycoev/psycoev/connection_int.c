@@ -263,8 +263,6 @@ conn_set_client_encoding(connectionObject *self, const char *enc)
     if (strcmp(self->encoding, enc) == 0) 
 	return 0;
 
-    /* TODO: check for async query here and raise error if necessary */
-
     /* set encoding, no encoding string is longer than 24 bytes */
     PyOS_snprintf(query, 47, "SET client_encoding = '%s'", enc);
 

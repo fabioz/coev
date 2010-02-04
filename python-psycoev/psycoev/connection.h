@@ -60,8 +60,6 @@ typedef struct {
 
     PGconn *pgconn;         /* the postgresql connection */
 
-    PyObject *async_cursor;
-
     /* notice processing */
     PyObject *notice_list;
     PyObject *notice_filter;

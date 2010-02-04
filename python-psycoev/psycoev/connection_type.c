@@ -427,7 +427,6 @@ connection_setup(connectionObject *self, const char *dsn)
     self->notifies = PyList_New(0);
     self->closed = 0;
     self->status = CONN_STATUS_READY;
-    self->async_cursor = NULL;
     self->pgconn = NULL;
     self->mark = 0;
     self->string_types = PyDict_New();
@@ -469,7 +468,6 @@ connection_dealloc(PyObject* obj)
 
     Py_CLEAR(self->notice_list);
     Py_CLEAR(self->notifies);
-    Py_CLEAR(self->async_cursor);
     Py_CLEAR(self->string_types);
     Py_CLEAR(self->binary_types);
 
@@ -515,7 +513,6 @@ connection_repr(connectionObject *self)
 static int
 connection_traverse(connectionObject *self, visitproc visit, void *arg)
 {
-    Py_VISIT(self->async_cursor);
     Py_VISIT(self->notice_list);
     Py_VISIT(self->notice_filter);
     Py_VISIT(self->notifies);

@@ -304,23 +304,10 @@ static PyObject *_psyco_curs_validate_sql_basic(
 
 static int
 _psyco_curs_execute(cursorObject *self,
-                    PyObject *operation, PyObject *vars, long int async)
+                    PyObject *operation, PyObject *vars)
 {
     int res = 0;
     PyObject *fquery, *cvt = NULL;
-
-    Py_BEGIN_ALLOW_THREADS;
-    pthread_mutex_lock(&(self->conn->lock));
-    if (self->conn->async_cursor != NULL
-        && self->conn->async_cursor != (PyObject*)self) {
-        pthread_mutex_unlock(&(self->conn->lock));
-        Py_BLOCK_THREADS;
-        psyco_set_error(ProgrammingError, (PyObject*)self,
-                         "asynchronous query already in execution", NULL, NULL);
-        return 0;
-    }
-    pthread_mutex_unlock(&(self->conn->lock));
-    Py_END_ALLOW_THREADS;
 
     operation = _psyco_curs_validate_sql_basic(self, operation);
 
@@ -481,7 +468,7 @@ psyco_curs_execute(cursorObject *self, PyObject *args, PyObject *kwargs)
 
     EXC_IF_CURS_CLOSED(self);
 
-    if (_psyco_curs_execute(self, operation, vars, async)) {
+    if (_psyco_curs_execute(self, operation, vars)) {
         Py_INCREF(Py_None);
         return Py_None;
     }
@@ -524,7 +511,7 @@ psyco_curs_executemany(cursorObject *self, PyObject *args, PyObject *kwargs)
     }
 
     while ((v = PyIter_Next(vars)) != NULL) {
-        if (_psyco_curs_execute(self, operation, v, 0) == 0) {
+        if (_psyco_curs_execute(self, operation, v) == 0) {
             Py_DECREF(v);
             Py_XDECREF(iter);
             return NULL;
@@ -652,21 +639,6 @@ _psyco_curs_prefetch(cursorObject *self)
 {
     int i = 0;
 
-    /* check if the fetching cursor is the one that did the asynchronous query
-       and raise an exception if not */
-    Py_BEGIN_ALLOW_THREADS;
-    pthread_mutex_lock(&(self->conn->lock));
-    if (self->conn->async_cursor != NULL
-        && self->conn->async_cursor != (PyObject*)self) {
-        pthread_mutex_unlock(&(self->conn->lock));
-        Py_BLOCK_THREADS;
-        psyco_set_error(ProgrammingError, (PyObject*)self,
-                         "asynchronous fetch by wrong cursor", NULL, NULL);
-        return -2;
-    }
-    pthread_mutex_unlock(&(self->conn->lock));
-    Py_END_ALLOW_THREADS;
-
     if (self->pgres == NULL || self->needsfetch) {
         self->needsfetch = 0;
         Dprintf("_psyco_curs_prefetch: trying to fetch data");
@@ -787,12 +759,6 @@ psyco_curs_fetchone(cursorObject *self, PyObject *args)
 
     self->row++; /* move the counter to next line */
 
-    /* if the query was async aggresively free pgres, to allow
-       successive requests to reallocate it */
-    if (self->row >= self->rowcount
-        && self->conn->async_cursor == (PyObject*)self)
-        IFCLEARPGRES(self->pgres);
-
     return res;
 }
 
@@ -861,12 +827,6 @@ psyco_curs_fetchmany(cursorObject *self, PyObject *args, PyObject *kwords)
         PyList_SET_ITEM(list, i, res);
     }
 
-    /* if the query was async aggresively free pgres, to allow
-       successive requests to reallocate it */
-    if (self->row >= self->rowcount
-        && self->conn->async_cursor == (PyObject*)self)
-        IFCLEARPGRES(self->pgres);
-
     return list;
 }
 
@@ -927,12 +887,6 @@ psyco_curs_fetchall(cursorObject *self, PyObject *args)
         PyList_SET_ITEM(list, i, res);
     }
 
-    /* if the query was async aggresively free pgres, to allow
-       successive requests to reallocate it */
-    if (self->row >= self->rowcount
-        && self->conn->async_cursor == (PyObject*)self)
-        IFCLEARPGRES(self->pgres);
-
     return list;
 }
 
@@ -986,7 +940,7 @@ psyco_curs_callproc(cursorObject *self, PyObject *args, PyObject *kwargs)
     operation = PyString_FromString(sql);
     PyMem_Free((void*)sql);
 
-    if (_psyco_curs_execute(self, operation, parameters, async)) {
+    if (_psyco_curs_execute(self, operation, parameters)) {
         Py_INCREF(parameters);
         res = parameters;
     }
@@ -1454,87 +1408,6 @@ psyco_curs_copy_expert(cursorObject *self, PyObject *args, PyObject *kwargs)
     return res;
 }
 
-/* extension: fileno - return the file descripor of the connection */
-
-#define psyco_curs_fileno_doc \
-"fileno() -> int -- Return file descriptor associated to database connection."
-
-static PyObject *
-psyco_curs_fileno(cursorObject *self, PyObject *args)
-{
-    long int socket;
-
-    if (!PyArg_ParseTuple(args, "")) return NULL;
-    EXC_IF_CURS_CLOSED(self);
-
-    /* note how we call PQflush() to make sure the user will use
-       select() in the safe way! */
-    Py_BEGIN_ALLOW_THREADS;
-    pthread_mutex_lock(&(self->conn->lock));
-    PQflush(self->conn->pgconn);
-    socket = (long int)PQsocket(self->conn->pgconn);
-    pthread_mutex_unlock(&(self->conn->lock));
-    Py_END_ALLOW_THREADS;
-
-    return PyInt_FromLong(socket);
-}
-
-/* extension: isready - return true if data from async execute is ready */
-
-#define psyco_curs_isready_doc \
-"isready() -> bool -- Return True if data is ready after an async query."
-
-static PyObject *
-psyco_curs_isready(cursorObject *self, PyObject *args)
-{
-    int res;
-    
-    if (!PyArg_ParseTuple(args, "")) return NULL;
-    EXC_IF_CURS_CLOSED(self);
-
-    /* pq_is_busy does its own locking, we don't need anything special but if
-       the cursor is ready we need to fetch the result and free the connection
-       for the next query. if -1 is returned we raise an exception. */
-
-    res = pq_is_busy(self->conn);
-    
-    if (res == 1) {
-        Py_INCREF(Py_False);
-        return Py_False;
-    }
-    else if (res == -1) {
-        return NULL;
-    }
-    else {
-        IFCLEARPGRES(self->pgres);
-        Py_BEGIN_ALLOW_THREADS;
-        pthread_mutex_lock(&(self->conn->lock));
-        self->pgres = PQgetResult(self->conn->pgconn);
-        self->conn->async_cursor = NULL;
-        pthread_mutex_unlock(&(self->conn->lock));
-        Py_END_ALLOW_THREADS;
-        self->needsfetch = 1;
-        Py_INCREF(Py_True);
-        return Py_True;
-    }
-}
-
-/* extension: closed - return true if cursor is closed*/
-
-#define psyco_curs_closed_doc \
-"True if cursor is closed, False if cursor is open"
-
-static PyObject *
-psyco_curs_get_closed(cursorObject *self, void *closure)
-{
-    PyObject *closed;
-
-    closed = (self->closed || (self->conn && self->conn->closed)) ?
-        Py_True : Py_False;
-    Py_INCREF(closed);
-    return closed;
-}
-
 #endif
 
 
@@ -1597,10 +1470,6 @@ static struct PyMethodDef cursorObject_methods[] = {
 #ifdef PSYCOPG_EXTENSIONS
     {"mogrify", (PyCFunction)psyco_curs_mogrify,
      METH_VARARGS|METH_KEYWORDS, psyco_curs_mogrify_doc},
-    {"fileno", (PyCFunction)psyco_curs_fileno,
-     METH_VARARGS, psyco_curs_fileno_doc},
-    {"isready", (PyCFunction)psyco_curs_isready,
-     METH_VARARGS, psyco_curs_isready_doc},
     {"copy_from", (PyCFunction)psyco_curs_copy_from,
      METH_VARARGS|METH_KEYWORDS, psyco_curs_copy_from_doc},
     {"copy_to", (PyCFunction)psyco_curs_copy_to,
@@ -1648,10 +1517,6 @@ static struct PyMemberDef cursorObject_members[] = {
 
 /* object calculated member list */
 static struct PyGetSetDef cursorObject_getsets[] = {
-#ifdef PSYCOPG_EXTENSIONS
-    { "closed", (getter)psyco_curs_get_closed, NULL,
-      psyco_curs_closed_doc, NULL },
-#endif
     {NULL}
 };
 

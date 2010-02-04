@@ -547,8 +547,8 @@ pq_raise_from_conn(PGconn *pgconn) {
 
     returns:
             0 if all is ok.
-           -1 iff an exception was raised.
-
+           -1 iff an exception was raised. 
+              pgres is not valid after this.
 */
 
 int
@@ -779,7 +779,7 @@ pq_is_busy(connectionObject *conn)
     return res;
 }
 
-/** pq_execute - execute a query, possibly asyncronously
+/** pq_execute - execute a query.
 
     0 on success
     nonzero on failure.
@@ -804,8 +804,10 @@ pq_execute(cursorObject *curs, const char *query)
         return -1;
 
     curs->pgres = pqp_exec(curs->conn->pgconn, query, curs->conn->pg_io_timeout);
-    if (pq_check_result(curs->conn->pgconn, curs->pgres))
+    if (pq_check_result(curs->conn->pgconn, curs->pgres)) {
+        curs->pgres = NULL;
         return -1;
+    }
     
     if (pq_fetch(curs) == -1) 
         return -1;
@@ -1031,10 +1033,11 @@ _pq_copy_in_v3(cursorObject *curs)
         if (curs->pgres == NULL)
             break;
         
-        if (pq_check_result(curs->conn->pgconn, curs->pgres) == -1)
+        if (pq_check_result(curs->conn->pgconn, curs->pgres) == -1) {
+            curs->pgres = NULL;
             return -1;
-        
-        IFCLEARPGRES(curs->pgres);
+        }
+        PQclear(curs->pgres);
     }
    
     return error == 0 ? 1 : -1;
@@ -1045,13 +1048,11 @@ _pq_copy_out_v3(cursorObject *curs)
 {
     PyObject *tmp = NULL;
 
-    char *buffer;
+    char *buffer = NULL;
     Py_ssize_t len;
 
     while (1) {
-        Py_BEGIN_ALLOW_THREADS;
-        len = PQgetCopyData(curs->conn->pgconn, &buffer, 0);
-        Py_END_ALLOW_THREADS;
+        len = pqp_getcopydata(curs->conn->pgconn, &buffer, curs->conn->pg_io_timeout);
 
         if (len > 0 && buffer) {
             tmp = PyObject_CallMethod(curs->copyfile,
