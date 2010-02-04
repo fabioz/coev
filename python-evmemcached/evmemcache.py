@@ -595,7 +595,8 @@ class Client(object):
         for key in keys:
             line = connection.readline()
             if line != 'STORED':
-                retval.append([prefixed_to_orig_key[rkey]])
+                retval.append([prefixed_to_orig_key[key]])
+        el.debug('stored: %d/%d', len(keys), len(retval))
         return retval
 
     def set_multi(self, mapping, ttl=0, key_prefix='', min_compress_len=0):
@@ -657,7 +658,9 @@ class Client(object):
             el.info('[%s] wcount=%d', coev.getpos(), wcount)
             wcount -= 1
             try:
-                retval += coev.switch2scheduler()
+                rv = coev.switch2scheduler()
+                el.debug("worker retval %r", retval)
+                retval += rv 
             except Exception, e:
                 el.exception('worker failed: %s', e)
         el.debug('returning %d keys', len(retval))
