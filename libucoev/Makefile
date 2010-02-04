@@ -1,4 +1,4 @@
-ABIVERSION=0.3
+ABIVERSION=0.4
 
 CFLAGS=-fwrapv -O2 -fno-strict-aliasing -Wstrict-prototypes -g -Wall -fPIC 
 

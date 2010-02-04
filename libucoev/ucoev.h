@@ -280,6 +280,9 @@ int coev_stall(void);
 /* switch to scheduler and not schedule itself. */
 int coev_switch2scheduler(void);
 
+/* report if a scheduler is active */
+int coev_is_scheduling(void);
+
 /* ensure switchback will only occur after given coro exits, and will be from it */
 void coev_join(coev_t *);
 

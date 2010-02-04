@@ -356,9 +356,9 @@ _get_a_coev(void) {
     prev_avail = NULL;
 
     if (!rv) {
-        rv = malloc(sizeof(coev_t));
+        rv = calloc(1, sizeof(coev_t));
         if (rv == NULL)
-           fm_abort("_get_a_coev(): malloc() failed");
+           fm_abort("_get_a_coev(): calloc() failed");
         _fm.i.coevs_allocated ++;
     } else {
         /* remove from the avail list if we took it from there */
@@ -924,6 +924,11 @@ coev_switch2scheduler(void) {
         return 0;
     }
     return CSCHED_NOSCHEDULER;
+}
+
+int
+coev_is_scheduling(void) {
+    return (ts_scheduler.scheduler != NULL) ? 1 : 0;
 }
 
 /* in your io_scheduler, stopping your watcher, switching to your waiter */
