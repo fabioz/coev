@@ -66,7 +66,8 @@ pqp_raise_from_coev(void) {
         case CSW_TIMEOUT:
             PyErr_SetString(Error, "I/O Timeout");
         default:
-            PyErr_SetString(Error, "Unexpected status after coev_wait()");
+            PyErr_Format(Error, "Unexpected status after coev_wait(): [%s/%s], treepos=[%s]",
+                    coev_state(coev_current()), coev_status(coev_current()), coev_treepos(coev_current()));
     }
     return -1;
 }
@@ -670,9 +671,7 @@ pq_abort(connectionObject *conn)
 
 
 static void
-pq_close_runner(coev_t *c) {
-    connectionObject *conn = (connectionObject *)(c->A);
-    
+pq_closer_core(connectionObject *conn) {
     /* execute a forced rollback on the connection (but don't check the
        result, we're going to close the pq connection anyway */
     if (conn->pgconn) {
@@ -680,41 +679,56 @@ pq_close_runner(coev_t *c) {
 	    pq_abort(conn);
     
         PQfinish(conn->pgconn);
-        Dprintf("pq_close_runner: PQfinish called");
+        Dprintf("pq_closer_core: PQfinish called");
         conn->pgconn = NULL;
     }
-    Dprintf("pq_close_runner: finished.");
+    Dprintf("pq_closer_core: finished.");
 }
 
-/* create a coroutine to perform the cleanup on connection */
-/* problem is, if there is no scheduler, we must not do 
-   Py_BEGIN_ALLOW_THREADS/Py_END_ALLOW_THREADS because pq_abort's pqp_exec
-   will do this for us. */
+static void
+pq_close_runner(coev_t *c) {
+    /* mimic threadingmodule.c::t_bootstrap */
+    PyThreadState *tstate;
+    
+    connectionObject *conn;
+
+    tstate = PyThreadState_New( (PyInterpreterState *)c->X);
+    PyEval_AcquireThread(tstate);
+    
+    conn = (connectionObject *)(c->A);
+    
+    c->A = NULL;
+    c->X = NULL;
+    
+    pq_closer_core(conn);
+
+    PyThreadState_Clear(tstate);
+    PyThreadState_DeleteCurrent();
+}
+
 void 
 pq_close(connectionObject *conn) {
-    coev_t *closer = PyMem_Malloc(sizeof(coev_t));
-    coev_t *sched;
+    coev_t *closer;
     
+    if (coev_is_scheduling())
+        return pq_closer_core(conn);
+    
+    /* mimic threadingmodule.c::thread_PyThread_start_new_thread */
+    closer = coev_new(&pq_close_runner, 16*4096);
     if (closer == NULL)
         Py_FatalError("pq_close(): no memory (psycoev)");
-    
-    closer = coev_new(&pq_close_runner, 8*4096);
+
     closer->A = conn;
+    closer->X = PyThreadState_GET()->interp;
+    PyEval_InitThreads(); 
+    
     coev_schedule(closer);
     
     Py_BEGIN_ALLOW_THREADS
-    sched = coev_loop();
+    Dprintf("pq_close: becoming a scheduler.");
+    coev_loop();
+    Dprintf("pq_close: ceasing being a scheduler.");
     Py_END_ALLOW_THREADS
-    
-    if (sched != NULL) {
-        Py_BEGIN_ALLOW_THREADS
-        if (coev_stall() == CSCHED_NOSCHEDULER) {
-            Dprintf("pq_close: CSCHED_NOSCHEDULER from coev_stall(), but coev_loop() returned [%s]", sched->treepos);
-            Py_FatalError("pq_close: unpossible contradiction in scheduler existence.");
-        }
-        Dprintf("pq_close: control is back from coev_stall(), doing Py_END_ALLOW_THREADS.");
-        Py_END_ALLOW_THREADS
-    }
     
     if ((closer->state != CSTATE_DEAD) && (closer->state != CSTATE_ZERO) )
         /* this is suprising */
