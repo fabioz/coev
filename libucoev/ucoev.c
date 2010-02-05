@@ -1461,6 +1461,7 @@ colock_release(colock_t *p) {
         if (lucky == p->queue_head)
             p->queue_head = NULL;
         colock_dump("colock_release(): lock after release", p);
+        lucky->state = CSTATE_RUNNABLE;
         coev_schedule(lucky);
     }
 }
