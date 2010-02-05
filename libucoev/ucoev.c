@@ -700,9 +700,10 @@ coev_switch(coev_t *target) {
             fm_abort("switch to uninitialized coroutine");
     }
     
+    if (origin->state == CSTATE_CURRENT)
+        origin->state = CSTATE_RUNNABLE;
+    
     target->origin = origin;
-    origin->state = CSTATE_RUNNABLE;
-    target->status = CSW_VOLUNTARY;
     target->state = CSTATE_CURRENT;
     target->status = CSW_VOLUNTARY;
     ts_current = target;
@@ -1417,7 +1418,8 @@ colock_acquire(colock_t *p, int wf) {
         
         /* switch somewhere */
         ts_current->state = CSTATE_LOCKWAIT;
-        ts_current->status = CSW_VOLUNTARY;
+        coev_dprintf("colock_acquire(): [%s] sleeping on %p owner [%s], switching out\n", 
+            ts_current->treepos, p, p->owner);
         if (ts_scheduler.scheduler)
             coev_switch(ts_scheduler.scheduler);
         else
