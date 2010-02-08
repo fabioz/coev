@@ -1,3 +1,9 @@
+python2.6-coev (2.6.2-8) unstable; urgency=low
+
+  * bump libucoev0 version 
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Thu, 04 Feb 2010 18:00:48 +0300
+
 python2.6-coev (2.6.2-7) ubuntu; urgency=low
 
   * plug in reference leak on ignored sigchlds

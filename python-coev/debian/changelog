@@ -1,3 +1,9 @@
+python-libcoev (0.4-1) unstable; urgency=low
+
+  * update to require libucoev 0.4
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Thu, 04 Feb 2010 18:07:17 +0300
+
 python-libcoev (0.3-2) unstable; urgency=low
 
   * fixed crashes related to poor reference handling 
