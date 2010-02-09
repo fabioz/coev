@@ -787,7 +787,6 @@ coev_initialstub(void) {
     /* release resources */
     parent = _coev_sweep(self);
 
-
     /* find switchable target by ignoring dead and busy coroutines */
     while (    (parent != NULL)
             && (parent->state != CSTATE_RUNNABLE) )
@@ -1390,22 +1389,20 @@ colock_free(colock_t *lock) {
 int
 colock_acquire(colock_t *p, int wf) {
     colock_dump("colock_acquire():", p);
-    _fm.i.cl_acquires ++;
+    _fm.i.c_lock_acquires ++;
     
     if (p->owner != NULL) {
         colo_dprintf("colock_acquire(%p, %d): [%s]: fail; lock owner [%s]\n", 
             p, wf, ts_current->treepos, p->owner->treepos);
-        
-        /*
-        if (p->owner == ts_current)
-            return 42;
-        */
-        
+
         if (wf == 0) {
-            _fm.i.cl_acfails ++;
+            _fm.i.c_lock_acfails ++;
             return 0;
         }
 
+        _fm.i.c_lock_waits ++;
+        _fm.i.coevs_on_lock ++;
+        
         /* put curcoro into the FIFO from the head. */
         ts_current->lq_prev = NULL;
         ts_current->lq_next = p->queue_head;
@@ -1428,6 +1425,9 @@ colock_acquire(colock_t *p, int wf) {
         colo_dprintf("colock_acquire(%p, %d): [%s] (waiter); switchback from [%s]; p->owner [%s]\n",
             p, wf, ts_current->treepos, ts_current->origin->treepos, 
             p->owner ? p->owner->treepos : "(nil)");
+        
+        _fm.i.coevs_on_lock --;
+        
     } else
         p->owner = (coev_t *)ts_current;
     
@@ -1443,7 +1443,7 @@ colock_release(colock_t *p) {
         colo_dprintf("colock_release(%p): [%s] releases a lock that has no owner\n", p, ts_current->treepos);
         return;
     }
-    _fm.i.cl_releases ++;
+    _fm.i.c_lock_releases ++;
     
     colo_dprintf("colock_release(%p): [%s] releases lock that was acquired by [%s]; next owner [%s]\n", 
         p, ts_current->treepos, 

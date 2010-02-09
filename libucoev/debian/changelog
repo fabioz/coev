@@ -1,3 +1,9 @@
+libucoev0 (0.5-1) unstable; urgency=low
+
+  * stats reporting straighted out
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 09 Feb 2010 17:10:22 +0300
+
 libucoev0 (0.4-1) unstable; urgency=low
 
   * fix uninitialized memory usage (coev_new); add scheduler detector
