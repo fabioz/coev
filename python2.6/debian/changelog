@@ -1,3 +1,9 @@
+python2.6-coev (2.6.2-9) unstable; urgency=low
+
+  * bump libucoev0 version
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 09 Feb 2010 17:52:51 +0300
+
 python2.6-coev (2.6.2-8) unstable; urgency=low
 
   * bump libucoev0 version 
