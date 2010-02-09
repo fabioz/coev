@@ -1,3 +1,9 @@
+python-psycoev (2.0.7-9) unstable; urgency=low
+
+  * bump libucoev0 version
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 09 Feb 2010 17:53:56 +0300
+
 python-psycoev (2.0.7-8) unstable; urgency=low
 
   * fix double-PQclear on cursor deallocation after SQL error; remove every notion of async cursor execution as psycoev can not run synchronously
