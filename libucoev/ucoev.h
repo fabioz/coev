@@ -391,6 +391,7 @@ void coev_getstats(coev_instrumentation_t *i);
 #define CDF_STACK        0x100   /* stack debug */
 #define CDF_STACK_DUMP   0x200   /* stack bunch dumps */
 #define CDF_COLB_DUMP    0x400   /* lock storage dumps */
+#define CDF_CB_ON_NEW_DUMP 0x800   /* coev busy bunch dump on new coev allocation */
 
 void coev_setdebug(int flagsmask);
 void coev_dmprintf(const char *, ...);

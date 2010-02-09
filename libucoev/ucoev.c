@@ -348,6 +348,8 @@ struct _coev_t_bunch {
     coev_t *busy;
 } ts_coev_bunch;
 
+static void _coev_dump_busy_bunch(void);
+
 static coev_t *
 _get_a_coev(void) {
     coev_t *rv, *prev_avail;
@@ -360,6 +362,8 @@ _get_a_coev(void) {
         if (rv == NULL)
            fm_abort("_get_a_coev(): calloc() failed");
         _fm.i.coevs_allocated ++;
+        if (_fm.debug & CDF_CB_ON_NEW_DUMP)
+            _coev_dump_busy_bunch();
     } else {
         /* remove from the avail list if we took it from there */
         if (prev_avail)
@@ -627,6 +631,28 @@ coev_state(coev_t *c) {
 const char* 
 coev_status(coev_t *c) {
     return str_coev_status[c->status];
+}
+
+static void
+_coev_dump_busy_bunch(void) {
+    coev_t *sp;
+    
+    coev_dmprintf("Busy bunch:\n");
+    sp = ts_coev_bunch.busy;
+    while (sp) {
+        coev_dmprintf("%p [%s] %s; origin %p [%s] %s csw %s iow %d/%d iot %d/%d slt %d/%d\n",
+            sp, sp->treepos, str_coev_state[sp->state],
+            sp->origin, sp->origin ? sp->origin->treepos : "(nil)", 
+            sp->origin ? str_coev_state[sp->origin->state] : "(nil)", 
+            str_coev_status[sp->status],
+            ev_is_active(&sp->watcher), ev_is_pending(&sp->watcher),
+            ev_is_active(&sp->io_timer), ev_is_pending(&sp->io_timer),
+            ev_is_active(&sp->sleep_timer), ev_is_pending(&sp->sleep_timer)
+        );
+        
+        sp = sp->cb_next;
+    }
+
 }
 
 
