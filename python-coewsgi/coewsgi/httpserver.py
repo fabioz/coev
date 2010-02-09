@@ -387,13 +387,7 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         finally:
             self.request.close()
     
-    def watch_handling(self, timeout):
-        coev.sleep(timeout)
-        self.handling_coroutine.throw(coev.Exit)
-
     def handle_one_request(self):
-        if self.stats_collector:
-            self.stats_collector.incr('coewsgi.c_requests')        
         try:
             self.raw_requestline = self.rfile.readline(8192)
         except coev.Timeout:
@@ -401,16 +395,25 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
                 self.stats_collector.incr('coewsgi.c_timeouts')
             self.close_connection = 1
             return
-        if not self.raw_requestline:
+        except:
             if self.stats_collector:
                 self.stats_collector.incr('coewsgi.c_readerrs')
             self.close_connection = 1
             return
+        
+        if not self.raw_requestline:
+            self.close_connection = 1
+            return
+    
+        if self.stats_collector:
+            self.stats_collector.incr('coewsgi.c_requests')
+            
         if not self.parse_request(): # An error code has been sent, just exit
             if self.stats_collector:
                 self.stats_collector.incr('coewsgi.c_badreqs')
             self.close_connection = 1
             return
+
         try:
             self.wsgi_execute()
         except Exception, e:
@@ -422,7 +425,6 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         # don't bother logging disconnects while handling a request
         try:
             self.close_connection = 1
-
             self.handle_one_request()
             while not self.close_connection:
                 self.handle_one_request()
@@ -636,6 +638,7 @@ if __name__ == '__main__':
     sys.setcheckinterval(10000000)
     logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
     #coev.setdebug(True, coev.CDF_COEV | coev.CDF_COEV_DUMP |coev.CDF_RUNQ_DUMP | coev.CDF_NBUF)
+    #coev.setdebug(True, coev.CDF_CB_ON_NEW_DUMP)
     coev.setdebug(False, 0)
     #coev.setdebug(True, coev.CDF_COEV)
     sys.excepthook = sys.__excepthook__
