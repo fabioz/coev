@@ -55,6 +55,7 @@ static struct _const_def {
     { "CDF_COLB_DUMP", CDF_COLB_DUMP },
     { "CDF_STACK", CDF_STACK},
     { "CDF_STACK_DUMP", CDF_STACK_DUMP },
+    { "CDF_CB_ON_NEW_DUMP", CDF_CB_ON_NEW_DUMP },
     { 0 }
 };
 
@@ -877,19 +878,21 @@ mod_stats(PyObject *a, PyObject *b) {
     if (_add_K_to_dict(dick, "c_stalls", i.c_stalls)) return NULL;
     if (_add_K_to_dict(dick, "c_runqruns", i.c_runqruns)) return NULL;
     if (_add_K_to_dict(dick, "c_news", i.c_news)) return NULL;
-    if (_add_K_to_dict(dick, "stacks_allocated", i.stacks_allocated)) return NULL;
-    if (_add_K_to_dict(dick, "stacks_used", i.stacks_used)) return NULL;
-    if (_add_K_to_dict(dick, "cnrbufs_allocated", i.cnrbufs_allocated)) return NULL;
-    if (_add_K_to_dict(dick, "cnrbufs_used", i.cnrbufs_used)) return NULL;
-    if (_add_K_to_dict(dick, "coevs_allocated", i.coevs_allocated)) return NULL;
-    if (_add_K_to_dict(dick, "coevs_used", i.coevs_used)) return NULL;
-    if (_add_K_to_dict(dick, "waiters", i.waiters)) return NULL;
-    if (_add_K_to_dict(dick, "slackers", i.slackers)) return NULL;  
-    if (_add_K_to_dict(dick, "colocks_allocated", i.colocks_allocated)) return NULL;
-    if (_add_K_to_dict(dick, "colocks_used", i.colocks_used)) return NULL;
-    if (_add_K_to_dict(dick, "cl_acquires", i.cl_acquires)) return NULL;
-    if (_add_K_to_dict(dick, "cl_acfails", i.cl_acfails)) return NULL;
-    if (_add_K_to_dict(dick, "cl_releases", i.cl_releases)) return NULL;
+    if (_add_K_to_dict(dick, "stacks.allocated", i.stacks_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "stacks.used", i.stacks_used)) return NULL;
+    if (_add_K_to_dict(dick, "cnrbufs.allocated", i.cnrbufs_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "cnrbufs.used", i.cnrbufs_used)) return NULL;
+    if (_add_K_to_dict(dick, "coevs.allocated", i.coevs_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "coevs.used", i.coevs_used)) return NULL;
+    if (_add_K_to_dict(dick, "coevs.waiting", i.waiters)) return NULL;
+    if (_add_K_to_dict(dick, "coevs.slacking", i.slackers)) return NULL;  
+    if (_add_K_to_dict(dick, "coevs.on_lock", i.coevs_on_lock)) return NULL;  
+    if (_add_K_to_dict(dick, "locks.allocated", i.colocks_allocated)) return NULL;
+    if (_add_K_to_dict(dick, "locks.used", i.colocks_used)) return NULL;
+    if (_add_K_to_dict(dick, "locks.c_acquires", i.c_lock_acquires)) return NULL;
+    if (_add_K_to_dict(dick, "locks.c_acfails", i.c_lock_acfails)) return NULL;
+    if (_add_K_to_dict(dick, "locks.c_waits", i.c_lock_waits)) return NULL;
+    if (_add_K_to_dict(dick, "locks.c_releases", i.c_lock_releases)) return NULL;
 
     return dick;
 }
