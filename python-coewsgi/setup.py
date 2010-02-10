@@ -1,6 +1,6 @@
 from setuptools import setup
 
-VERSION = '0.3'
+VERSION = '0.4'
 DESCRIPTION = 'coewsgi - coev-based HTTP WSGI gateway'
 LONG_DESCRIPTION = """
     A port of HTTP WSGI gateway from Paste to the coev
