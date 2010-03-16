@@ -362,6 +362,7 @@ _get_a_coev(void) {
         if (rv == NULL)
            fm_abort("_get_a_coev(): calloc() failed");
         _fm.i.coevs_allocated ++;
+        rv->treepos = NULL;
         if (_fm.debug & CDF_CB_ON_NEW_DUMP)
             _coev_dump_busy_bunch();
     } else {
@@ -520,7 +521,6 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->parent = (coev_t*)ts_current;
     ts_current->child_count ++;
     
-    child->treepos = NULL;
     update_treepos(child);
     child->run = runner;
     child->state = CSTATE_RUNNABLE;
