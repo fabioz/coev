@@ -121,7 +121,7 @@ static struct _exc_def {
         "switch to or scheduling of a coroutine with an active event watcher attempted\n"
     },
     {
-        &PyExc_CoroSocketError, &PyExc_CoroError,
+        &PyExc_CoroSocketError, &PyExc_IOError,
         "coev.SocketError", "SocketError",
         "ask Captain Obvious\n"
     },
@@ -847,13 +847,18 @@ mod_current(PyObject *a, PyObject *b) {
 static int
 _add_K_to_dict(PyObject *dick, const char *key, uint64_t val) {
     PyObject *pyval;
+    int rv = -1;
     pyval = Py_BuildValue("K", val);
-    if (pyval)
+    if (pyval) {
         if ( PyDict_SetItemString(dick, key, pyval) == 0 )
-            return 0;
-    
-    Py_CLEAR(dick);
-    return -1;
+            rv = 0;
+        else {
+            Py_DECREF(dick);
+            rv = -1;
+        }
+        Py_DECREF(pyval);
+    }
+    return rv;
 }
 
 PyDoc_STRVAR(mod_stats_doc,

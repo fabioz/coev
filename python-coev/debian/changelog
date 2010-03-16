@@ -1,3 +1,9 @@
+python-libcoev (0.5-2) unstable; urgency=low
+
+  * plug memleak in .stats(); derive SocketError from IOError.
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 16 Mar 2010 16:54:07 +0300
+
 python-libcoev (0.5-1) unstable; urgency=low
 
   * update to require libucoev 0.5; rename coev stats dict key names
