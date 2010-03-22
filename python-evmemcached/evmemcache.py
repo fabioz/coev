@@ -662,7 +662,7 @@ class Client(object):
                 el.debug("worker retval %r", retval)
                 retval += rv 
             except Exception, e:
-                el.exception('worker failed: %s', e)
+                el.error('worker failed: %s', e)
         el.debug('returning %d keys', len(retval))
         el.info('[%s] workers collected; returning', coev.getpos())
         return retval
