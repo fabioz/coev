@@ -29,6 +29,21 @@ class TooManyConnections(Exception):
 class NoEndpointsConnectable(Exception):
     pass
 
+class IOpTimeout(Exception):
+    def __init__(self, connstr):
+        self.msg = self.__class__.__name__ + ': ' + connstr
+        
+    def __str__(self):
+        return self.msg
+
+class ReadTimeout(IOpTimeout):
+    pass
+    
+class WriteTimeout(IOpTimeout):
+    pass
+    
+
+
 class Connection(object):
     """ those are stored in the connection pool """
     def __init__(self, pool, endpoint, conn_timeout, iop_timeout, read_limit):
@@ -59,7 +74,10 @@ class Connection(object):
         
     def close(self):
         self.sock.close()
-        
+    
+    def __str__(self):
+        return self.__repr__()
+
     def __repr__(self):
         return "Connection(id={0:#08x} peer={1!r} endpoint={2!r})".format(id(self),self.sock.getpeername(), self.endpoint)
         
@@ -70,23 +88,32 @@ class ConnectionProxy(object):
     def read(self, hint=0):
         try:
             return self.conn.sfile.read(hint)
-        except:
+        except Exception, e:
             self.conn.dead = True
-            raise
+            if e.errno == 110: 
+                raise ReadTimeout(repr(self.conn))
+            e.conn = repr(self.conn)
+            raise e
         
     def readline(self, hint=0):
         try:
             return self.conn.sfile.readline(hint)
-        except:
+        except Exception, e:
             self.conn.dead = True
-            raise
+            if e.errno == 110: 
+                raise ReadTimeout(repr(self.conn))
+            e.conn = repr(self.conn)
+            raise e
         
     def write(self, data):
         try:
             return self.conn.sfile.write(data)
-        except:
+        except Exception, e:
             self.conn.dead = True
-            raise
+            if e.errno == 110: 
+                raise WriteTimeout(repr(self.conn))
+            e.conn = repr(self.conn)
+            raise e
 
     def __del__(self):
         self.conn.release()
