@@ -1,3 +1,9 @@
+python-libcoev (0.5-3) ubuntu; urgency=low
+
+  * report failed endpoint on iop_timeout
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Mon, 22 Mar 2010 16:19:45 +0300
+
 python-libcoev (0.5-2) unstable; urgency=low
 
   * plug memleak in .stats(); derive SocketError from IOError.

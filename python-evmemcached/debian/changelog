@@ -1,3 +1,9 @@
+python-evmemcached (0.1-6) ubuntu; urgency=low
+
+  * do not log traceback on worker failure
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Mon, 22 Mar 2010 16:20:35 +0300
+
 python-evmemcached (0.1-5) unstable; urgency=low
 
   * multiset fixed
