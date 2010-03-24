@@ -463,6 +463,7 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         if self.request_version != 'HTTP/0.9':
             self.rq_header += "\r\n"
         self.wfile.write(self.rq_header)
+        self.rq_header = ''
 
     def handle_one_request(self):
         try:
