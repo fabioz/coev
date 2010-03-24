@@ -77,7 +77,8 @@ class CoevWSGIServer(object):
                         wsgi_timeout = None,
                         accept_concurrency_limit = 1500,
                         accept_limit_window = 40,
-                        accept_bunch_size = 5 ):
+                        accept_bunch_size = 5, 
+                        explicit_flush = False ):
         self.server_address = server_address
         self.request_queue_size = request_queue_size
         self.accept_concurrency_limit = accept_concurrency_limit
@@ -88,6 +89,7 @@ class CoevWSGIServer(object):
         self.iop_timeout = iop_timeout
         self.wsgi_application = wsgi_application
         self.wsgi_timeout = wsgi_timeout
+        self.explicit_flush = explicit_flush
         self.el = logging.getLogger('coewsgi.cwserver')
         if issubclass(type(wsgi_application), StatsMiddleware):
             self.stats_collector = wsgi_application
@@ -414,6 +416,7 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
         self.request = request
         self.client_address = client_address
         self.server = server
+        self.explicit_flush = self.server.explicit_flush
 
         self.connection = self.request
         self.rfile = self.wfile = coev.socketfile(self.request.fileno(), 
@@ -427,6 +430,11 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
             self.handle()
         finally:
             self.request.close()
+
+    def flush(self):
+        if self.explicit_flush:
+            self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
 
     # origin: BaseHTTPRequestHandler; goal: reduce write() count.
     def send_response(self, code, message=None):
@@ -510,6 +518,7 @@ class CoevWSGIHandler(WSGIHandlerMixin, BaseHTTPRequestHandler):
             self.handle_one_request()
             while not self.close_connection:
                 self.handle_one_request()
+                self.server.flush()
         except SocketErrors, exce:
             self.server.stats_collector.incr('coewsgi.c_clientdrops')
         except:
@@ -526,7 +535,8 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
           ssl_context=None, server_version=None, protocol_version=None,
           start_loop=True, socket_timeout=4.2,
           request_queue_size=10, response_timeout=4.2,
-          request_timeout=4.2, server_status=None, **kwargs):
+          request_timeout=4.2, server_status=None, 
+          explicit_flush=False, **kwargs):
           
     """
     Serves your ``application`` over HTTP via WSGI interface
@@ -591,7 +601,12 @@ def serve(application, host=None, port=None, handler=None, ssl_pem=None,
         
     ``server_status``
     
-        This specifies path where coev/coewsgi status be output. 
+        This specifies path where coev/coewsgi status be output.
+        
+    ``explicit_flush``
+    
+        Force packets to be sent at the end of each HTTP-keepalive request
+        by toggling TCP_NODELAY socket option.
 
     """
     assert not handler, "foreign handlers are prohibited"
