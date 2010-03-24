@@ -162,7 +162,7 @@ struct _coev_lock {
     colbunch_t *bunch;
 };
 
-static TLS_ATTR volatile coev_t *ts_current;
+static TLS_ATTR coev_t * volatile ts_current;
 static TLS_ATTR volatile int ts_count;
 static TLS_ATTR coev_t *ts_root;
 static TLS_ATTR colbunch_t *ts_rootlockbunch;
@@ -426,6 +426,10 @@ _free_coevs(void) {
             span = spa->cb_next;
         if (spb)
             spbn = spb->cb_next;
+        if (spa->treepos)
+            _fm.free(spa->treepos);
+        if (spb->treepos)
+            _fm.free(spb->treepos);
         if (spa)
             free(spa);
         if (spb)
@@ -440,12 +444,12 @@ _free_coevs(void) {
 
 /* end of coev_t allocator */
 
-static void update_treepos(coev_t *);
 static void io_callback(struct ev_loop *, ev_io *, int );
 static void sleep_callback(struct ev_loop *, ev_timer *, int );
 static void iotimeout_callback(struct ev_loop *, ev_timer *, int );
 
 /** initialize the root coroutine */
+static char *_root_treepos = "0";
 static void
 coev_init_root(coev_t *root) {
     if (ts_current != NULL) 
@@ -467,8 +471,8 @@ coev_init_root(coev_t *root) {
     root->lq_next = NULL;
     root->lq_prev = NULL;
     root->child_count = 0;
-    
-    update_treepos(root);
+    root->treepos = _root_treepos;
+    root->treepos_is_stale = 0;
     
 #ifdef THREADING_MADNESS
     root->thread = pthread_self();
@@ -510,7 +514,7 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->ctx.uc_stack.ss_sp = cstack->sp;
     /* child->ctx.uc_stack.ss_flags = 0; */
     child->ctx.uc_stack.ss_size = stacksize;
-    child->ctx.uc_link = &(((coev_t*)ts_current)->ctx);
+    child->ctx.uc_link = &(ts_current->ctx);
     child->stack = cstack;
     
     makecontext(&child->ctx, coev_initialstub, 0);
@@ -518,10 +522,10 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     child->id = ts_count++;
     
     child->child_count = 0;
-    child->parent = (coev_t*)ts_current;
+    child->parent = ts_current;
     ts_current->child_count ++;
     
-    update_treepos(child);
+    child->treepos_is_stale = 1;
     child->run = runner;
     child->state = CSTATE_RUNNABLE;
     child->status = CSW_NONE;
@@ -547,13 +551,42 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     return child;
 }
 
+/* tree position reporting */
+/*
+   Is stored in coev_t::treepos in the form of string of coroutine ids.
+   Is not updated until absolutely necessary, that is, when the string 
+   is explicitly requested, and it has not been built for this coroutine
+   yet, or has changed since via coev_setparent().
+
+   Possible values are NULL, previous (stale) treepos or actual treepos. 
+   Memory is allocated via framework-supplied allocator.
+
+   Access is via coev_treepos() function only. 
+   Functions from this module only access stale flag, these include
+   coev_new() and coev_setparent().
+
+   Initial value is NULL.
+
+   Internal calls to coev_treepos() do not happen if debug is turned off,
+   thus not wasting cycles on building it.
+
+   First call to coev_treepos() _fm.realloc()-s the NULL. Subsequent calls
+   touch the string only if it got stale.
+   
+   Memory is freed at coev_t deallocation only.
+   
+   Root coroutine has fixed treepos of "0". 
+   its coev_t is allocated outside this module, thus _fm.free() call on it is
+   not possible.
+   
+*/
+
 #define MAX_CHARS_PER_LEVEL 12
 #define MAX_LEVELS_REPORTED 0x100
 static TLS_ATTR char tp_onebuf[MAX_CHARS_PER_LEVEL + 4];
 static TLS_ATTR char tp_scrpad[MAX_CHARS_PER_LEVEL*MAX_LEVELS_REPORTED + 4];
+static char *_null_treepos = "(nil)";
 
-
-/* returns memory allocated with init-time supplied allocator */
 static void
 update_treepos(coev_t *coio) {
     coev_t *c = coio;
@@ -561,7 +594,7 @@ update_treepos(coev_t *coio) {
     char *rv;
     int written;
     char *curpos;
-    
+
     curpos = tp_scrpad + sizeof(tp_scrpad) - 1;
     *curpos = '\0';
     curpos -= 1;
@@ -573,23 +606,27 @@ update_treepos(coev_t *coio) {
         rvlen += written;
         c = c->parent;
     }
-    rv = _fm.malloc(rvlen);
+    rv = _fm.realloc(coio->treepos, rvlen);
     if (!rv)
-	fm_abort("treepos(): memory allocation failed.");
+	fm_abort("treepos(): memory [re]allocation failed.");
     memmove(rv, curpos+1, rvlen-1); /* strip leading space */
-    if (coio->treepos)
-        _fm.free(coio->treepos);
     coio->treepos = rv;
+    coio->treepos_is_stale = 0;
 }
 
 const char *
 coev_treepos(coev_t *coio) {
+    if (!coio)
+        return _null_treepos;
+    if (   (coio->treepos == NULL) 
+        ||  coio->treepos_is_stale )
+        update_treepos(coio);
     return coio->treepos;
 }
 
 coev_t *
 coev_current(void) {
-    return (coev_t*)ts_current;
+    return ts_current;
 }
 
 static const char* 
@@ -642,8 +679,8 @@ _coev_dump_busy_bunch(void) {
     sp = ts_coev_bunch.busy;
     while (sp) {
         coev_dmprintf("%p [%s] %s; origin %p [%s] %s csw %s iow %d/%d iot %d/%d slt %d/%d\n",
-            sp, sp->treepos, str_coev_state[sp->state],
-            sp->origin, sp->origin ? sp->origin->treepos : "(nil)", 
+            sp, coev_treepos(sp), str_coev_state[sp->state],
+            sp->origin, coev_treepos(sp->origin), 
             sp->origin ? str_coev_state[sp->origin->state] : "(nil)", 
             str_coev_status[sp->status],
             ev_is_active(&sp->watcher), ev_is_pending(&sp->watcher),
@@ -671,9 +708,9 @@ _coev_dump(char *m, coev_t *c) {
 	    "    io watcher  active=%d pending=%d\n"
             "    io timeout  active=%d pending=%d\n"
             "    sleep timer active=%d pending=%d\n",
-        c, c->treepos, str_coev_state[c->state], 
+        c, coev_treepos(c), str_coev_state[c->state], 
         str_coev_status[c->status],
-        (coev_t*)ts_current, ts_root,
+        ts_current, ts_root,
         c == ts_current,
         c == ts_root,
         c == ts_scheduler.scheduler,
@@ -691,11 +728,11 @@ static void coev_runq_remove(coev_t *);
 /** entry point: function for voluntary switching between coroutines */
 void
 coev_switch(coev_t *target) {
-    coev_t *origin = (coev_t*)ts_current;
+    coev_t *origin = ts_current;
     CROSSTHREAD_CHECK(target, p);
     
     coev_dprintf("coev_switch(): from [%s] to [%s]\n", 
-	origin->treepos, target->treepos);
+	coev_treepos(origin), coev_treepos(target));
     coev_dump("switch, origin", origin);
     coev_dump("switch, target", target);        
     
@@ -748,7 +785,7 @@ coev_switch(coev_t *target) {
 static void
 coev_stop_watchers(coev_t *subject) {
     coev_dprintf("coev_stop_watchers() [%s]: watcher %d/%d iotimer %d/%d sleep_timer %d/%d\n",
-        subject->treepos, 
+        coev_treepos(subject),
         ev_is_active(&subject->watcher), ev_is_pending(&subject->watcher),
         ev_is_active(&subject->io_timer), ev_is_pending(&subject->io_timer),
         ev_is_active(&subject->sleep_timer), ev_is_pending(&subject->sleep_timer));
@@ -770,15 +807,15 @@ static coev_t *
 _coev_sweep(coev_t *suspect) {
     coev_t *parent;
     coev_dprintf("_coev_sweep(): starting at [%s] %s cc=%d\n", 
-        suspect->treepos, str_coev_state[suspect->state], suspect->child_count);
+        coev_treepos(suspect), str_coev_state[suspect->state], suspect->child_count);
     while (suspect != NULL) {
         if ((suspect->child_count > 0) || (suspect->state != CSTATE_DEAD)) {
             coev_dprintf("_coev_sweep(): returning [%s] %s cc=%d\n", 
-                suspect->treepos, str_coev_state[suspect->state], suspect->child_count);
+                coev_treepos(suspect), str_coev_state[suspect->state], suspect->child_count);
             return suspect;
         }
         coev_dprintf("_coev_sweep(): releasing [%s] %s cc=%d\n", 
-            suspect->treepos, str_coev_state[suspect->state], suspect->child_count);
+            coev_treepos(suspect), str_coev_state[suspect->state], suspect->child_count);
         
         parent = suspect->parent;
         _return_a_stack(suspect->stack);
@@ -794,15 +831,13 @@ _coev_sweep(coev_t *suspect) {
 /** the first and last function that runs in the coroutine */
 static void 
 coev_initialstub(void) {
-    coev_t *self = (coev_t*)ts_current;
+    coev_t *self = ts_current;
     coev_t *parent;
 
     self->run(self);
     
     coev_dprintf("[%s] dead: parent [%s] origin [%s] A=%p X=%p Y=%p S=%p\n",
-        self->treepos, 
-        (self->parent != NULL) ?  self->parent->treepos : "<null parent>",
-        (self->origin != NULL) ?  self->origin->treepos : "<null origin>",
+        coev_treepos(self), coev_treepos(self->parent), coev_treepos(self->origin),
         self->A, self->X, self->Y, self->S );
     
     /* clean up any scheduler stuff */
@@ -832,7 +867,7 @@ coev_initialstub(void) {
     parent->origin = self;
     ts_current = parent;
 
-    coev_dprintf("coev_initialstub(): switching to [%s]\n", parent->treepos);    
+    coev_dprintf("coev_initialstub(): switching to [%s]\n", coev_treepos(parent));
 
     setcontext(&parent->ctx);
     
@@ -891,7 +926,7 @@ _runq_dump(const char *header) {
         coev_dprintf("    RUNQUEUE EMPTY\n");
     
     while (next) {
-        coev_dprintf("    <%p> [%s] %s %s\n", next, next->treepos,
+        coev_dprintf("    <%p> [%s] %s %s\n", next, coev_treepos(next),
             str_coev_state[next->state], str_coev_status[next->status] );
         if (next == next->rq_next)
             fm_abort("_runq_dump(): runqueue loop detected");
@@ -922,7 +957,7 @@ coev_schedule(coev_t *waiter) {
     waiter->status = CSW_YOURTURN;
     coev_runq_append(waiter);
     coev_dprintf("coev_schedule: [%s] %s scheduled.\n",
-        waiter->treepos, str_coev_state[waiter->state]);
+        coev_treepos(waiter), str_coev_state[waiter->state]);
     ts_scheduler.slackers++;
     return 0;
 }
@@ -932,7 +967,7 @@ coev_stall(void) {
     _fm.i.c_stalls ++;
     if (ts_scheduler.scheduler) {
         int rv;
-        rv = coev_schedule((coev_t *)ts_current);
+        rv = coev_schedule(ts_current);
         if (rv)
             return rv;
         coev_switch(ts_scheduler.scheduler);
@@ -972,7 +1007,7 @@ io_callback(struct ev_loop *loop, ev_io *w, int revents) {
     coev_runq_append(waiter);
     ts_scheduler.waiters -= 1;
     
-    coev_dprintf("io_callback(): [%s] revents=%d\n", waiter->treepos, revents);
+    coev_dprintf("io_callback(): [%s] revents=%d\n", coev_treepos(waiter), revents);
 }
 
 static void
@@ -989,7 +1024,7 @@ iotimeout_callback(struct ev_loop *loop, ev_timer *w, int revents) {
     coev_runq_append(waiter);
     ts_scheduler.waiters--;
     
-    coev_dprintf("iotimeout_callback(): [%s].\n", waiter->treepos);
+    coev_dprintf("iotimeout_callback(): [%s].\n", coev_treepos(waiter));
 }
 
 static void
@@ -1005,18 +1040,18 @@ sleep_callback(struct ev_loop *loop, ev_timer *w, int revents) {
     coev_runq_append(waiter);
     ts_scheduler.waiters--;
     
-    coev_dprintf("sleep_callback(): [%s]\n", waiter->treepos);
+    coev_dprintf("sleep_callback(): [%s]\n", coev_treepos(waiter));
 }
 
 /* sets current coro to wait for revents on fd, switches to scheduler */
 void 
 coev_wait(int fd, int revents, ev_tstamp timeout) {
-    coev_t *self = (coev_t*)ts_current;
+    coev_t *self = ts_current;
     
     coev_dprintf("coev_wait(): [%s] %s scheduler [%s], self->parent [%s]\n", 
-        self->treepos,  str_coev_state[self->state],
-        ts_scheduler.scheduler ? ts_scheduler.scheduler->treepos : "none", 
-        self->parent ? self->parent->treepos : "none");
+        coev_treepos(self),  str_coev_state[self->state],
+        coev_treepos(ts_scheduler.scheduler), 
+        coev_treepos(self->parent));
 
     if ((!ts_scheduler.scheduler) || (ts_scheduler.scheduler->state != CSTATE_RUNNABLE)) {
         coev_dprintf("ts_scheduler.scheduler %p, state %s\n",
@@ -1091,13 +1126,13 @@ coev_wait(int fd, int revents, ev_tstamp timeout) {
         && (ts_current->status != CSW_TIMEOUT)) {
 	/* someone's being rude. */
         coev_dprintf("coev_wait(): [%s]/%s is being rude to [%s] %s %s\n",
-            self->origin->treepos, str_coev_state[self->origin->state],
-            self->treepos, str_coev_state[self->state], 
+            coev_treepos(self->origin), str_coev_state[self->origin->state],
+            coev_treepos(self), str_coev_state[self->state], 
             str_coev_status[self->status]);
         fm_abort("unscheduled switch into event-waiting coroutine");
     }
     coev_dprintf("coev_wait(): [%s] switch back from [%s] %s CSW: %s\n", 
-        self->treepos, self->origin->treepos,
+        coev_treepos(self), coev_treepos(self->origin),
         str_coev_state[self->origin->state],  str_coev_status[self->status]);
 }
 
@@ -1137,12 +1172,12 @@ coev_sleep(ev_tstamp amount) {
 
 coev_t *
 coev_loop(void) {
-    coev_dprintf("[%s] coev_loop(): scheduler entered.\n", ts_current->treepos);
+    coev_dprintf("[%s] coev_loop(): scheduler entered.\n", coev_treepos(ts_current));
     
     if (ts_scheduler.scheduler)
         return ts_scheduler.scheduler;
     
-    ts_scheduler.scheduler = (coev_t*)ts_current;
+    ts_scheduler.scheduler = ts_current;
     ts_scheduler.stop_flag = 0;
     
     do {
@@ -1151,7 +1186,7 @@ coev_loop(void) {
         
 	runq_dump("coev_loop(): runqueue before running it");
         coev_dprintf("[%s] coev_loop(): %d waiters\n", 
-            ts_current->treepos, ts_scheduler.waiters);
+            coev_treepos(ts_current), ts_scheduler.waiters);
 	
         /* guard against infinite loop in scheduler in case something 
            schedules itself over and over */
@@ -1159,7 +1194,7 @@ coev_loop(void) {
         ts_scheduler.runq_head = ts_scheduler.runq_tail = NULL;
         
         coev_dprintf("[%s] coev_loop(): running the queue.\n",
-            ts_current->treepos);
+            coev_treepos(ts_current));
         _fm.i.c_runqruns ++;
         _fm.i.waiters = ts_scheduler.waiters;
         _fm.i.slackers = ts_scheduler.slackers;
@@ -1167,7 +1202,7 @@ coev_loop(void) {
         
 	while ((target = runq_head)) {
             coev_dprintf("[%s] coev_loop(): runqueue run: target %p head %p next %p\n", 
-                ts_current->treepos, target, runq_head, target->rq_next);
+                coev_treepos(ts_current), target, runq_head, target->rq_next);
 	    runq_head = target->rq_next;
             if (runq_head == target)
                 fm_abort("coev_loop(): runqueue loop detected");
@@ -1175,11 +1210,11 @@ coev_loop(void) {
             
             if ((target->state != CSTATE_RUNNABLE) && (target->state != CSTATE_SCHEDULED)) {
                 coev_dprintf("[%s] coev_loop(): [%s] is %s, skipping.\n",
-                    ts_current->treepos, target->treepos, str_coev_state[target->state]);
+                    coev_treepos(ts_current), coev_treepos(target), str_coev_state[target->state]);
                 continue;
             }
             coev_dprintf("[%s] coev_loop(): switching to [%s] %s %s\n",
-                ts_current->treepos, target->treepos, 
+                coev_treepos(ts_current), coev_treepos(target), 
                 str_coev_state[target->state], 
                 str_coev_status[target->status]);
             
@@ -1203,25 +1238,25 @@ coev_loop(void) {
             switch (ts_current->status) {
                 case CSW_VOLUNTARY:
                     coev_dprintf("[%s] coev_loop(): yield from %p [%s]\n", 
-                        ts_current->treepos, ts_current->origin, 
-                        ts_current->origin->treepos);
+                        coev_treepos(ts_current), ts_current->origin, 
+                        coev_treepos(ts_current->origin));
                     break;
                 case CSW_SIGCHLD:
                     coev_dprintf("[%s] coev_loop(): sigchld from %p [%s] ignored.\n", 
-                         ts_current->treepos, ts_current->origin, 
-                         ts_current->origin->treepos);
+                         coev_treepos(ts_current), ts_current->origin, 
+                         coev_treepos(ts_current->origin));
                     break;
                 default:
-                    coev_dprintf("Unexpected switch to scheduler (i'm [%s])\n", ts_current->treepos);
+                    coev_dprintf("Unexpected switch to scheduler (i'm [%s])\n", coev_treepos(ts_current));
                     coev_dump("origin", ts_current->origin); 
-                    coev_dump("self", (coev_t *)ts_current);
+                    coev_dump("self", ts_current);
                     fm_abort("unexpected switch to scheduler");
             }
 	}
         
 	runq_dump("coev_loop(): runqueue after running it");
         coev_dprintf("[%s] coev_loop(): %d waiters\n", 
-            ts_current->treepos, ts_scheduler.waiters);
+            coev_treepos(ts_current), ts_scheduler.waiters);
         
 	if (ts_scheduler.runq_head != NULL) 
 	    ev_loop(ts_scheduler.loop, EVLOOP_NONBLOCK);
@@ -1233,7 +1268,7 @@ coev_loop(void) {
     } while (!ts_scheduler.stop_flag);
     
     ts_scheduler.scheduler = NULL;
-    coev_dprintf("[%s] coev_loop(): scheduler exited.\n", ts_current->treepos);
+    coev_dprintf("[%s] coev_loop(): scheduler exited.\n", coev_treepos(ts_current));
     return NULL;
 }
 
@@ -1260,7 +1295,7 @@ _colbunch_dump(colbunch_t *subject) {
         i = 0;
         while (lc != NULL) {
             colo_dprintf("            <%p>: owner [%s] bunch %p\n", lc, 
-                lc->owner != NULL ? lc->owner->treepos : "(nil)", 
+                coev_treepos(lc->owner), 
                 lc->bunch);
             lc = lc->next;
             i++;
@@ -1271,7 +1306,7 @@ _colbunch_dump(colbunch_t *subject) {
         i = 0;
         while (lc != NULL) {
             colo_dprintf("            <%p>: owner [%s] bunch %p\n", lc, 
-                lc->owner != NULL ? lc->owner->treepos : "(nil)", 
+                coev_treepos(lc->owner), 
                 lc->bunch);
             lc = lc->next;
             i++;
@@ -1285,14 +1320,14 @@ _colock_dump(const char *msg, colock_t *subject) {
     colo_dprintf("%s lock at <%p> current=[%s] owner=[%s] head=%p tail=%p\n",
         msg,
         subject,
-        ts_current->treepos,
-        subject->owner == NULL ? "none" : subject->owner->treepos,
+        coev_treepos(ts_current),
+        coev_treepos(subject->owner),
         subject->queue_head, 
         subject->queue_tail );
     {
         coev_t *p = subject->queue_head;
         while (p) {
-            colo_dprintf("      [%s]\n", p->treepos);
+            colo_dprintf("      [%s]\n", coev_treepos(p));
             p = p->lq_next;
         }
     }
@@ -1375,7 +1410,7 @@ colock_allocate(void) {
     lock->queue_head = NULL;
     lock->queue_tail = NULL;
 
-    colo_dprintf("colock_allocate(): [%s] allocates %p\n", ts_current->treepos, lock);
+    colo_dprintf("colock_allocate(): [%s] allocates %p\n", coev_treepos(ts_current), lock);
     colbunch_dump(ts_rootlockbunch);
     _fm.i.colocks_used ++;
     return (void *) lock;
@@ -1388,8 +1423,8 @@ colock_free(colock_t *lock) {
     
     lock->owner = NULL;
         
-    colo_dprintf("colock_free(%p): [%s] deallocates [%s]'s %p (of bunch %p)\n", lock, ts_current->treepos, 
-        lock->owner != NULL ? lock->owner->treepos : "(nil)",  lock, bunch);
+    colo_dprintf("colock_free(%p): [%s] deallocates [%s]'s %p (of bunch %p)\n", lock, coev_treepos(ts_current), 
+        coev_treepos(lock->owner), lock, bunch);
     
     prev = bunch->used;
     
@@ -1420,7 +1455,7 @@ colock_acquire(colock_t *p, int wf) {
     
     if (p->owner != NULL) {
         colo_dprintf("colock_acquire(%p, %d): [%s]: fail; lock owner [%s]\n", 
-            p, wf, ts_current->treepos, p->owner->treepos);
+            p, wf, coev_treepos(ts_current), coev_treepos(p->owner));
 
         if (wf == 0) {
             _fm.i.c_lock_acfails ++;
@@ -1435,30 +1470,30 @@ colock_acquire(colock_t *p, int wf) {
         ts_current->lq_next = p->queue_head;
         
         if (p->queue_head)
-            p->queue_head->lq_prev = (coev_t *)ts_current;
-        p->queue_head = (coev_t *)ts_current;
+            p->queue_head->lq_prev = ts_current;
+        p->queue_head = ts_current;
         if (!p->queue_tail)
             p->queue_tail = p->queue_head;
         
         /* switch somewhere */
         ts_current->state = CSTATE_LOCKWAIT;
         coev_dprintf("colock_acquire(): [%s] sleeping on %p owner [%s], switching out\n", 
-            ts_current->treepos, p, p->owner);
+            coev_treepos(ts_current), p, p->owner);
         if (ts_scheduler.scheduler)
             coev_switch(ts_scheduler.scheduler);
         else
             coev_switch(p->owner);
 
         colo_dprintf("colock_acquire(%p, %d): [%s] (waiter); switchback from [%s]; p->owner [%s]\n",
-            p, wf, ts_current->treepos, ts_current->origin->treepos, 
-            p->owner ? p->owner->treepos : "(nil)");
+            p, wf, coev_treepos(ts_current), coev_treepos(ts_current->origin), 
+            coev_treepos(p->owner));
         
         _fm.i.coevs_on_lock --;
         
     } else
-        p->owner = (coev_t *)ts_current;
+        p->owner = ts_current;
     
-    colo_dprintf("colock_acquire(%p, %d): [%s] successfully acquires lock.\n", p, wf, ts_current->treepos);
+    colo_dprintf("colock_acquire(%p, %d): [%s] successfully acquires lock.\n", p, wf, coev_treepos(ts_current));
     
     return 1;
 }
@@ -1467,15 +1502,15 @@ void
 colock_release(colock_t *p) {
     colock_dump("colock_release():", p);
     if (p->owner == NULL) {
-        colo_dprintf("colock_release(%p): [%s] releases a lock that has no owner\n", p, ts_current->treepos);
+        colo_dprintf("colock_release(%p): [%s] releases a lock that has no owner\n", p, coev_treepos(ts_current));
         return;
     }
     _fm.i.c_lock_releases ++;
     
     colo_dprintf("colock_release(%p): [%s] releases lock that was acquired by [%s]; next owner [%s]\n", 
-        p, ts_current->treepos, 
-        p->owner != NULL ? p->owner->treepos : "(nil)", 
-        p->queue_tail != NULL ? p->queue_tail->treepos : "(nil)");
+        p, coev_treepos(ts_current), 
+        coev_treepos(p->owner), 
+        coev_treepos(p->queue_tail));
     
     p->owner = p->queue_tail;
     
@@ -1537,7 +1572,7 @@ cls_keychain_fini(cokeychain_t *kc) {
 
 static cokey_t *
 cls_find(long k) {
-    cokeychain_t *kc = &( ((coev_t *)ts_current)->kc);
+    cokeychain_t *kc = &(ts_current->kc);
     int i;
     
     while (kc) {
@@ -1573,7 +1608,7 @@ cls_get(long k) {
 
 int
 cls_set(long k, void *v) {
-    cokeychain_t *kc = &( ((coev_t *)ts_current)->kc);
+    cokeychain_t *kc = &(ts_current->kc);
     int i;
 
     while (kc) {
@@ -1982,6 +2017,10 @@ int
 coev_setparent(coev_t *target, coev_t *newparent) {
     coev_t *p;
     
+    if (target == ts_root)
+        /* no comment. */
+        return -1;
+    
     if (newparent->state == CSTATE_ZERO)
         /* wrong trousers */
         return -1;
@@ -1997,7 +2036,7 @@ coev_setparent(coev_t *target, coev_t *newparent) {
     
     newparent->child_count ++;
     target->parent = newparent;
-    update_treepos(target);
+    target->treepos_is_stale = 1;
     return 0;
 }
 

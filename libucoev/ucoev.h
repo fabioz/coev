@@ -82,35 +82,36 @@ struct _key_chain {
 typedef struct _coev_stack coevst_t;
 
 struct _coev {
-    ucontext_t ctx;     /* the context */
-    coevst_t *stack;    /* to free it fast*/
-    unsigned int id;    /* serial, to build debug representations / show tree position */
+    ucontext_t ctx;         /* the context */
+    coevst_t *stack;        /* to free it fast*/
+    unsigned int id;        /* serial, to build debug representations / show tree position */
     
-    coev_t *parent;     /* report death here */
+    coev_t *parent;         /* report death here */
 
-    coev_t *origin;     /* switched from here last time */
-    int state;          /* CSTATE_* -- state of this coroutine */
-    int status;         /* CSW_*  -- status of last switch into this coroutine */
-    char *treepos;      /* position in the tree */
+    coev_t *origin;         /* switched from here last time */
+    int state;              /* CSTATE_* -- state of this coroutine */
+    int status;             /* CSW_*  -- status of last switch into this coroutine */
+    char *treepos;          /* position in the tree */
+    int treepos_is_stale;   /* if it needs to be updated */
     unsigned int child_count; /* internal refcount */
     
-    coev_runner_t run;  /* entry point into the coroutine, NULL if the coro has already started. */
+    coev_runner_t run;      /* entry point into the coroutine, NULL if the coro has already started. */
     
     struct ev_io watcher;        /* IO watcher */
     struct ev_timer io_timer;    /* IO timeout timer. */
     struct ev_timer sleep_timer; /* sleep timer */
     
-    coev_t *rq_next;         /* runqueue list pointer */
-    coev_t *cb_next;   /* allocator internals */
-    coev_t *cb_prev;   /* allocator internals */
+    coev_t *rq_next;        /* runqueue list pointer */
+    coev_t *cb_next;        /* allocator internals */
+    coev_t *cb_prev;        /* allocator internals */
     
-    coev_t *lq_next;  /* lock waiting queue */
-    coev_t *lq_prev;  /* lock waiting queue */
+    coev_t *lq_next;        /* lock waiting queue */
+    coev_t *lq_prev;        /* lock waiting queue */
     
-    cokeychain_t kc;      /* CLS keychain */
-    cokeychain_t *kc_tail; /* CLS meta-keychain tail (if it was ever extended) */
+    cokeychain_t kc;        /* CLS keychain */
+    cokeychain_t *kc_tail;  /* CLS meta-keychain tail (if it was ever extended) */
        
-    void *A, *X, *Y, *S;  /* user-used stuff so that them don't need to fiddle with offsetof (6502 ftw) */
+    void *A, *X, *Y, *S;    /* user-used stuff so that they don't need to fiddle with offsetof (6502 ftw) */
     
 #ifdef THREADING_MADNESS
     pthread_t thread;
