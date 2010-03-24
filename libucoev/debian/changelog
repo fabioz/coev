@@ -1,4 +1,10 @@
-libucoev0 (0.5-2) karmic; urgency=low
+libucoev0 (0.5-3) unstable; urgency=low
+
+  * lower io_timeout timer priority
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Wed, 24 Mar 2010 15:39:14 +0300
+
+libucoev0 (0.5-2) unstable; urgency=low
 
   * plug memleak in treepos handling
 
