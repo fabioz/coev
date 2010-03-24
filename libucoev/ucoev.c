@@ -539,6 +539,7 @@ coev_new(coev_runner_t runner, size_t stacksize) {
     
     ev_init(&child->watcher, io_callback);
     ev_timer_init(&child->io_timer, iotimeout_callback, 23., 42.);
+    ev_set_priority(&child->io_timer, -1);
     ev_timer_init(&child->sleep_timer, sleep_callback, 23., 42.);
     
     _fm.i.c_news ++;
