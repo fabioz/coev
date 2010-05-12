@@ -1765,7 +1765,7 @@ cnrbuf_read(cnrbuf_t *self, void **p, ssize_t sizehint) {
         self->in_limit = sizehint;
 
     do {
-	if (( sizehint > 0) && (self->in_used >= sizehint )) {
+	if (( sizehint >= 0) && (self->in_used >= sizehint )) {
 	    *p = self->in_position;
 	    rv = sizehint;
 	    self->in_used -= sizehint;
