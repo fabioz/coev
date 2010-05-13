@@ -1,3 +1,9 @@
+python-libcoev (0.6-1) unstable; urgency=low
+
+  * update to require libucoev 0.6
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Wed, 12 May 2010 18:10:41 +0400
+
 python-libcoev (0.5-3) ubuntu; urgency=low
 
   * report failed endpoint on iop_timeout

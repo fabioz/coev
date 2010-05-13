@@ -1,3 +1,9 @@
+python-psycoev (2.0.7-10) ubuntu; urgency=low
+
+  * bump libucoev0 version
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Wed, 12 May 2010 18:11:12 +0400
+
 python-psycoev (2.0.7-9) unstable; urgency=low
 
   * bump libucoev0 version

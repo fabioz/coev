@@ -2,12 +2,12 @@ Source: python2.6-coev
 Section: unknown
 Priority: extra
 Maintainer: def <sivko@hh.ru>
-Build-Depends: debhelper (>= 6), autotools-dev, libucoev-dev (>= 0.5)
+Build-Depends: debhelper (>= 6), autotools-dev, libucoev-dev (>= 0.6)
 Standards-Version: 3.7.3
 Homepage: 
 
 Package: python2.6-coev
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, libucoev0 (>= 0.5)
+Depends: ${shlibs:Depends}, ${misc:Depends}, libucoev0 (>= 0.6)
 Description: Python-2.6 with coev patch
  Python-2.6 with coev patch
