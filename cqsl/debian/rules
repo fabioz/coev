@@ -1,6 +1,6 @@
 #!/usr/bin/make -f
 # Uncomment this to turn on verbose mode.
-#export DH_VERBOSE=1
+export DH_VERBOSE=1
 
 # shared library versions, option 1
 version=2.0.5
@@ -33,7 +33,7 @@ install: build
 	dh_prep  
 	dh_installdirs
 	# Add here commands to install the package into debian/tmp
-	/opt/python2.6-coev/bin/python ./setup.py install --root $(CURDIR)/debian/python-libcoev
+	/opt/python2.6-coev/bin/python ./setup.py install --root $(CURDIR)/debian/python-cqsl
 
 
 # Build architecture-independent files here.

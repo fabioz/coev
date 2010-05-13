@@ -1,3 +1,15 @@
+python-cqsl (0.1-4) ubuntu; urgency=low
+
+  * unneeded version bump
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 16 Mar 2010 18:25:32 +0300
+
+python-cqsl (0.1-3) unstable; urgency=low
+
+  * unneeded version bump
+
+ -- Alexander Sabourenkov <a.saburenkov@hh.ru>  Tue, 16 Mar 2010 18:16:25 +0300
+
 python-cqsl (0.1-2) unstable; urgency=low
 
   * unneeded version bump
