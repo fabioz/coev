@@ -465,7 +465,7 @@ static PyObject *sf_empty_string = NULL;
 
 PyDoc_STRVAR(socketfile_read_doc,
 "read([size]) -> bytestr\n\n\
-Read at most size bytes or until EOF is reached.\n\
+Read at most size bytes or return whatever there is in buffers (all of in-process and up to 8K from the kernel).\n\
 size -- size to read.\n\
 ");
 static PyObject * 
